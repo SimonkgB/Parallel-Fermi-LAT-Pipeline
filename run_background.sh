@@ -45,7 +45,7 @@ if [ "$#" -ge 1 ]; then
     shift
 fi
 
-nohup python3 parallel_runner/parallel_run.py "$CONFIG" "$@" > "$LOG_FILE" 2>&1 &
+nohup python3 runners/parallel_run.py "$CONFIG" "$@" > "$LOG_FILE" 2>&1 &
 
 PID=$!
 echo "Process started with PID: $PID"

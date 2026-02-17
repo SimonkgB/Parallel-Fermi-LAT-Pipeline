@@ -19,7 +19,7 @@ A parallel processing pipeline for Fermi LAT data analysis using Ftools. Massivl
 Set the `fermi_base` path in `parallel_runner/parallel_run.py` and `run_background.sh` to point to your fermitools conda/micromamba environment:
 
 ```python
-# In parallel_run.py -> setup_fermi_environment()
+# In runners/parallel_run.py -> setup_fermi_environment()
 fermi_base = "/path/to/your/conda/envs/fermi"
 ```
 

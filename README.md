@@ -8,7 +8,7 @@ A parallel processing pipeline for Fermi LAT data analysis using Ftools. Massivl
 - Python 3.6+
 - Fermi Science Tools (`fermitools`) installed via conda/micromamba
 - PyYAML (`pip install pyyaml`)
-- Astropy (optional, for `image_sum` merge strategy)
+- Astropy (optional, for `image_sum` merge)
 
 - Depends on usage, large amounts of RAM may be required
 

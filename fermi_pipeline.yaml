@@ -1,0 +1,126 @@
+# generic_pipeline.yaml
+# Configuration for the Fermi LAT Parallel Runner
+
+# 1. Resource Configuration
+resources:
+  # Number of cores to use (defaults to CPU count if not specified or "auto")
+  cores: 36
+  # RAM disk settings
+  ram_disk:
+    enabled: true
+    # Path to mount/use (will be cleaned up after use unless keep=true)
+    path: "/dev/shm/fermi_processing"
+    # Minimum RAM required (GB) to enable RAM disk
+    min_ram_gb: 500
+
+# 2. Input Data Configuration
+input:
+  # Directory containing source files
+  directory: "../weekly/photon"
+  # Glob pattern to match files
+  pattern: "lat_photon_weekly_w*.fits"
+  # How to group files for processing: 'one_to_one', 'chunks', 'all'
+  # 'one_to_one': 1 input file -> 1 job (standard for parallel processing)
+  grouping: "one_to_one" 
+
+# Common Files (Cached to RAM in parallel mode for speed)
+common_files:
+  scfile: "../mission/spacecraft/lat_spacecraft_merged.fits"
+
+# 3. Processing Steps
+# Define the chain of commands to run on each input group.
+# Keywords {input} and {output} are automatically handled.
+# You can define custom intermediate tags like {temp_gti} if a step produces named outputs used by later steps.
+steps:
+  - name: "gtselect"
+    command: >
+      gtselect evclass=INDEF evtype=INDEF
+      infile={input}
+      outfile={temp_select}
+      ra=0 dec=0 rad=180
+      tmin=INDEF tmax=INDEF
+      emin=1000 emax=500000
+      zmax=90
+    outputs:
+      - "{temp_select}" # Intermediate file
+
+  - name: "gtmktime"
+    # Uses the output from the previous step ({temp_select}) as input
+    command: >
+      gtmktime
+      scfile={scfile}
+      filter="(DATA_QUAL>0)&&(LAT_CONFIG==1)"
+      roicut=no
+      evfile={temp_select}
+      outfile={temp_gti}
+    outputs:
+      - "{temp_gti}" # Intermediate file 
+    cleanup:
+      - "{temp_select}" # Delete the previous step's output to save space
+
+  - name: "gtbin_ccube"
+    # Branch 1: Create Counts Cube from GTI
+    command: >
+      gtbin
+      algorithm=CCUBE
+      evfile={temp_gti}
+      outfile={chunk_ccube}
+      scfile={scfile}
+      nxpix=3600 nypix=1800 binsz=0.1
+      coordsys=GAL xref=0 yref=0 axisrot=0 proj=AIT
+      ebinalg=LOG emin=1000 emax=500000 enumbins=1
+    outputs:
+      - "{chunk_ccube}" # Final chunk output 1
+
+  - name: "gtltcube"
+    # Branch 2: Create Livetime Cube from GTI
+    command: >
+      gtltcube
+      evfile={temp_gti}
+      scfile={scfile}
+      outfile={chunk_ltcube}
+      dcostheta=0.025 binsz=1 phibins=1 zmax=90
+    outputs:
+      - "{chunk_ltcube}" # Final chunk output 2
+    cleanup:
+      - "{temp_gti}" # Cleanup GTI after both branches are done using it
+
+# 4. Merging Configuration
+# Define how to merge the results from all parallel chunks.
+merging:
+  - name: "merge_ccubes"
+    input_pattern: "{chunk_ccube}"
+    output_file: "./data/lat_source_zmax90_gt1gev_ccube_merged.fits"
+    # 'image_sum': Sums the image data (numpy) - good for counts maps
+    strategy: "image_sum"
+
+  - name: "merge_ltcubes"
+    input_pattern: "{chunk_ltcube}"
+    output_file: "./data/lat_source_zmax90_gt1gev_ltcube_merged.fits"
+    # 'hierarchical': Uses gtltsum in a binary tree fashion (efficient for many large files)
+    strategy: "hierarchical"
+    tool: "gtltsum" # Tool to use for the binary merge
+
+# 5. Post-Processing
+# Steps to run ONCE after everything is merged
+post_processing:
+  - name: "gtexpcube2"
+    command: >
+      gtexpcube2
+      infile=./data/lat_source_zmax90_gt1gev_ltcube_merged.fits
+      cmap=none
+      outfile=./data/lat_source_zmax90_gt1gev_expcube1_merged.fits
+      irfs=P8R3_SOURCE_V3
+      evtype=3
+      nxpix=3600 nypix=1800 binsz=0.1
+      coordsys=GAL xref=0 yref=0 axisrot=0 proj=AIT
+      emin=1000 emax=500000 enumbins=1
+
+  - name: "farith_correction"
+    command: >
+      farith
+      ./data/lat_source_zmax90_gt1gev_ccube_merged.fits
+      ./data/lat_source_zmax90_gt1gev_expcube1_merged.fits
+      ./data/lat_source_zmax90_gt1gev_corrmap_merged.fits
+      DIV
+      clobber=yes

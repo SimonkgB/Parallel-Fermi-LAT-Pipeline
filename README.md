@@ -16,7 +16,7 @@ A parallel processing pipeline for Fermi LAT data analysis using Ftools. Massivl
 
 ### 1. Configure your environment
 
-Set the `fermi_base` path in `parallel_runner/parallel_run.py` and `run_background.sh` to point to your fermitools conda/micromamba environment:
+Set the `fermi_base` path in `runners/parallel_run.py` and `run_background.sh` to point to your fermitools conda/micromamba environment:
 
 ```python
 # In runners/parallel_run.py -> setup_fermi_environment()
@@ -25,7 +25,7 @@ fermi_base = "/path/to/your/conda/envs/fermi"
 
 ### 2. Edit the pipeline config
 
-Modify `parallel_runner/fermi_pipeline.yaml` to match your data:
+Modify `fermi_pipeline.yaml` to match your data:
 
 ```yaml
 input:
@@ -43,19 +43,19 @@ resources:
 
 ```bash
 # Dry run (preview commands)
-python3 parallel_runner/parallel_run.py parallel_runner/fermi_pipeline.yaml --dry-run
+python3 runners/parallel_run.py fermi_pipeline.yaml --dry-run
 
 # Full run
-python3 parallel_runner/parallel_run.py parallel_runner/fermi_pipeline.yaml
+python3 runners/parallel_run.py fermi_pipeline.yaml
 
 # Background execution
-./run_background.sh parallel_runner/fermi_pipeline.yaml
+./run_background.sh fermi_pipeline.yaml
 ```
 
 ### 4. Run specific steps
 
 ```bash
-python3 parallel_runner/parallel_run.py parallel_runner/fermi_pipeline.yaml --steps gtselect,gtmktime
+python3 runners/parallel_run.py fermi_pipeline.yaml --steps gtselect,gtmktime
 ```
 
 ## Benchmarking
@@ -70,11 +70,10 @@ python3 benchmark.py --limit 10
 ## Project Structure
 
 ```
-├── parallel_runner/
+├── runners/
 │   ├── parallel_run.py        # Main parallel pipeline runner
-│   └── fermi_pipeline.yaml    # Pipeline configuration
-├── single_runner/
 │   └── single_run.py          # Single-core baseline runner
+├── fermi_pipeline.yaml    # Pipeline configuration
 ├── benchmark.py               # Performance comparison tool
 ├── run_background.sh          # Background execution wrapper
 ├── kill.sh                    # Kill all running instances of the pipeline

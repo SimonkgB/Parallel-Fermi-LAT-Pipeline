@@ -39,7 +39,7 @@ resources:
     min_ram_gb: 500
 ```
 
-### 3. Run the pipeline
+### 3. Run the pipeline (using an example)
 
 ```bash
 # Dry run (preview commands)
@@ -98,6 +98,9 @@ The YAML config supports:
 - **`merging`**: Strategies: `image_sum`, `hierarchical`, `ftmerge`
 - **`post_processing`**: Single-threaded follow-up commands
 - **`cleanup`**: Auto-delete intermediate files between steps
+
+## Inspiration/credits
+The example yaml and currently working pipeline take complete inspiraton of the great work of the Fermi ScienceTools team: https://github.com/fermi-lat/ScienceTools
 
 ## License
 

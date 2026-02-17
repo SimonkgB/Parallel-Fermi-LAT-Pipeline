@@ -1,0 +1,30 @@
+# Temporary / generated files
+benchmark_env/
+data/
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+runner.log
+pipeline_execution.log
+benchmark_single.log
+benchmark_parallel.log
+single_runner.log
+
+# Old scripts (not part of the parallel runner)
+multi.sh
+multi_1.sh
+check_events.sh
+test_diagnostic.sh
+test_ftmerge.sh
+clean.sh
+kill.sh
+monitor.sh
+RUN_DETACHED.sh
+
+# IDE
+.vscode/
+
+# Parameter files
+pfiles/

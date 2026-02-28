@@ -1,8 +1,8 @@
 #!/bin/bash
 # Usage: ./run_background.sh [config_file]
-# Example: ./run_background.sh parallel_runner/fermi_pipeline.yaml
+# Example: ./run_background.sh fermi_pipeline.yaml
 
-CONFIG=${1:-parallel_runner/fermi_pipeline.yaml}
+CONFIG=${1:-fermi_pipeline.yaml}
 LOG_FILE="pipeline_execution.log"
 
 echo "Starting pipeline in background..."

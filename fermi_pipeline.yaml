@@ -4,7 +4,7 @@
 # 1. Resource Configuration
 resources:
   # Number of cores to use (defaults to CPU count if not specified or "auto")
-  cores: 36
+  cores: 64
   # RAM disk settings
   ram_disk:
     enabled: true
@@ -21,7 +21,7 @@ input:
   pattern: "lat_photon_weekly_w*.fits"
   # How to group files for processing: 'one_to_one', 'chunks', 'all'
   # 'one_to_one': 1 input file -> 1 job (standard for parallel processing)
-  grouping: "one_to_one" 
+  grouping: "one_to_one"
 
 # Common Files (Cached to RAM in parallel mode for speed)
 common_files:
@@ -39,7 +39,7 @@ steps:
       outfile={temp_select}
       ra=0 dec=0 rad=180
       tmin=INDEF tmax=INDEF
-      emin=1000 emax=500000
+      emin=1000 emax=10000
       zmax=90
     outputs:
       - "{temp_select}" # Intermediate file
@@ -54,7 +54,7 @@ steps:
       evfile={temp_select}
       outfile={temp_gti}
     outputs:
-      - "{temp_gti}" # Intermediate file 
+      - "{temp_gti}" # Intermediate file
     cleanup:
       - "{temp_select}" # Delete the previous step's output to save space
 
@@ -68,7 +68,7 @@ steps:
       scfile={scfile}
       nxpix=3600 nypix=1800 binsz=0.1
       coordsys=GAL xref=0 yref=0 axisrot=0 proj=AIT
-      ebinalg=LOG emin=1000 emax=500000 enumbins=1
+      ebinalg=LOG emin=1000 emax=10000 enumbins=1
     outputs:
       - "{chunk_ccube}" # Final chunk output 1
 
@@ -90,13 +90,13 @@ steps:
 merging:
   - name: "merge_ccubes"
     input_pattern: "{chunk_ccube}"
-    output_file: "./data/lat_source_zmax90_gt1gev_ccube_merged.fits"
+    output_file: "./data/lat_source_zmax90_gt1_10gev_ccube_merged.fits"
     # 'image_sum': Sums the image data (numpy) - good for counts maps
     strategy: "image_sum"
 
   - name: "merge_ltcubes"
     input_pattern: "{chunk_ltcube}"
-    output_file: "./data/lat_source_zmax90_gt1gev_ltcube_merged.fits"
+    output_file: "./data/lat_source_zmax90_gt1_10gev_ltcube_merged.fits"
     # 'hierarchical': Uses gtltsum in a binary tree fashion (efficient for many large files)
     strategy: "hierarchical"
     tool: "gtltsum" # Tool to use for the binary merge
@@ -107,20 +107,20 @@ post_processing:
   - name: "gtexpcube2"
     command: >
       gtexpcube2
-      infile=./data/lat_source_zmax90_gt1gev_ltcube_merged.fits
+      infile=./data/lat_source_zmax90_gt1_10gev_ltcube_merged.fits
       cmap=none
-      outfile=./data/lat_source_zmax90_gt1gev_expcube1_merged.fits
+      outfile=./data/lat_source_zmax90_gt1_10gev_expcube1_merged.fits
       irfs=P8R3_SOURCE_V3
       evtype=3
       nxpix=3600 nypix=1800 binsz=0.1
       coordsys=GAL xref=0 yref=0 axisrot=0 proj=AIT
-      emin=1000 emax=500000 enumbins=1
+      emin=1000 emax=10000 enumbins=1
 
   - name: "farith_correction"
     command: >
       farith
-      ./data/lat_source_zmax90_gt1gev_ccube_merged.fits
-      ./data/lat_source_zmax90_gt1gev_expcube1_merged.fits
-      ./data/lat_source_zmax90_gt1gev_corrmap_merged.fits
+      ./data/lat_source_zmax90_gt1_10gev_ccube_merged.fits
+      ./data/lat_source_zmax90_gt1_10gev_expcube1_merged.fits
+      ./data/lat_source_zmax90_gt1_10gev_corrmap_merged.fits
       DIV
       clobber=yes

@@ -101,7 +101,7 @@ The YAML config supports:
 - **`cleanup`**: Auto-delete intermediate files between steps
 
 ## Inspiration/credits
-The example yaml and currently working pipeline take complete inspiraton of the great work of the Fermi ScienceTools team: https://github.com/fermi-lat/ScienceTools
+The example yaml and currently working pipeline take complete inspiraton form the works of the Fermi ScienceTools team: https://github.com/fermi-lat/ScienceTools
 
 ## License
 

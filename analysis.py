@@ -11,8 +11,8 @@ from astropy.units import Unit
 # -----------------------------
 # USER PARAMETERS
 # -----------------------------
-COUNTS_FITS   = "data/lat_source_zmax90_gt1gev_ccube_merged.fits"
-EXPOSURE_FITS = "data/lat_source_zmax90_gt1gev_expcube1_merged.fits"
+COUNTS_FITS   = "data/counts_1-500GeV_zmax90_gal-0.1deg_w009-w921.fits"
+EXPOSURE_FITS = "data/exposure_1-500GeV_zmax90_gal-0.1deg_w009-w921.fits"
 
 OUT_RESIDUAL  = "residual_sync_subtracted_intensity.fits"
 OUT_MODEL     = "bestfit_sync_model_intensity.fits"

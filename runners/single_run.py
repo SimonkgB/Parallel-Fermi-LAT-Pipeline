@@ -4,49 +4,47 @@ import os
 import argparse
 import time
 
-from runners.parallel_run import JobScheduler, ConfigLoader, Logger, RAMDiskManager, setup_fermi_environment
+# parallel_run.py lives in the same directory, so import it directly
+from parallel_run import (JobScheduler, ConfigLoader, Logger, setup_fermi_environment,
+                          seed_system_pfiles, preflight_par_check, raise_fd_limit,
+                          REPO_ROOT)
 
 def main():
+    # See parallel_run.main(): config paths and logs are repo-root relative.
+    os.chdir(REPO_ROOT)
+
     parser = argparse.ArgumentParser(description="Single-Core Fermi Runner (Baseline)")
     parser.add_argument("config", help="Path to YAML configuration file")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without executing")
-    parser.add_argument("--no-ram-disk", action="store_true", help="Disable RAM disk (force disk I/O)")
-    parser.add_argument("--steps", help="Comma-separated list of step names to run")
-    parser.add_argument("--skip-merge", action="store_true", help="Skip merge phase")
-    parser.add_argument("--skip-post", action="store_true", help="Skip post-processing")
-    
-    args = parser.parse_args()
-    
-    logger = Logger("single_runner.log")
-    logger.log("Starting SINGLE CORE baseline runner...")
 
-    setup_fermi_environment(logger)
-    
-    if args.no_ram_disk:
-        logger.log("RAM Disk DISABLED (Simulating standard disk I/O)")
-    
+    args = parser.parse_args()
+
+    logger = Logger("logs/single_runner.log")
+    logger.log("Starting SINGLE CORE baseline runner...")
+    logger.log("RAM Disk DISABLED (Simulating standard disk I/O)")
+
     try:
-        config = ConfigLoader.load(args.config)
-        
-        # Override config for single core baseline
+        config = ConfigLoader.load(args.config, logger)
+        setup_fermi_environment(logger, config.get('fermi_base'))
+        raise_fd_limit(logger)
+        seed_system_pfiles(logger)
+        if not preflight_par_check(config, logger):
+            sys.exit(1)
+
+        # Force single-core baseline: 1 core, no RAM disk (standard disk I/O)
         if 'resources' not in config:
             config['resources'] = {}
         config['resources']['cores'] = 1
-        
-        if args.no_ram_disk:
-            if 'resources' not in config: config['resources'] = {}
-            if 'ram_disk' not in config['resources']: config['resources']['ram_disk'] = {}
-            config['resources']['ram_disk']['enabled'] = False
-            
-        # Inject other CLI args (reuse logic)
+        if 'ram_disk' not in config['resources']:
+            config['resources']['ram_disk'] = {}
+        config['resources']['ram_disk']['enabled'] = False
+
+        # Run options come from the optional 'run:' section of the YAML config
+        run_opts = config.get('run', {}) or {}
         config['dry_run'] = args.dry_run
-        config['skip_merge'] = args.skip_merge
-        config['skip_post'] = args.skip_post
-        
-        if args.steps:
-            config['selected_steps'] = [s.strip() for s in args.steps.split(',')]
-        else:
-            config['selected_steps'] = None
+        config['skip_merge'] = run_opts.get('skip_merge', False)
+        config['skip_post'] = run_opts.get('skip_post', False)
+        config['selected_steps'] = run_opts.get('steps', None)  # None implies all steps
 
         # Execute
         scheduler = JobScheduler(config, logger)

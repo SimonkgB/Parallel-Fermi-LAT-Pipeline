@@ -1,0 +1,237 @@
+# fermi_pipeline_8perdecade.yaml
+# Configuration for the Fermi LAT Parallel Runner
+#
+# Variant of fermi_pipeline.yaml with EXACTLY 8 energy bins per decade.
+# Range 100 MeV -> 316.228 GeV = 3.5 decades, so enumbins = 8 * 3.5 = 28.
+# emax=316228 MeV places the bin edges exactly on the 8/decade grid anchored
+# at 100 MeV (100 * 10^(28/8) = 316227.77). The bins-per-decade relationship is:
+#     bins_per_decade = enumbins / log10(emax/emin)
+# The energy range + enumbins MUST match between gtbin_healpix and gtexpcube2.
+
+# 0. Run Options (optional)
+# Controls WHICH parts of the pipeline run. Omit this section to run everything.
+# run:
+#   steps: [gtselect, gtmktime]   # Only run these steps (omit to run all)
+#   skip_merge: false             # Skip the merging phase
+#   skip_post: false              # Skip post-processing
+
+# 0.5 Fermitools environment
+# Root of your fermitools conda/micromamba env. Used to set CALDB, FERMI_DIR,
+# PFILES, etc. If omitted, it is derived from the location of 'gtselect' on
+# PATH (i.e. works automatically inside an activated fermi env).
+# MUST stay a literal path: scripts/run_background.sh reads this key with grep
+# to find the env before that env's Python (and OmegaConf) is available.
+fermi_base: "/mn/stornext/d5/data/skgberg/micromamba/envs/fermi"
+
+# 0.6 Variables
+# Every value that appears in more than one place is declared ONCE here and
+# referenced with ${vars.x}. OmegaConf resolves these at load time, so by the
+# time a command is run the text is identical to a hand-written literal.
+# Note ${...} (config interpolation, resolved at load) never collides with
+# {...} (per-worker placeholders like {input}/{temp_gti}, resolved per task).
+#
+# The energy range and enumbins MUST match between gtbin_healpix and
+# gtexpcube2; declaring them here is what makes that guaranteed rather than a
+# comment asking a human to check.
+vars:
+  # --- naming ---
+  weeks: "w009-w947"            # update to match your input week range
+  energy_tag: "100MeV-316GeV-8pd"
+  selection: "zmax90"
+  grid: "hpx128"                # nside 128 == hpx_order 7 below
+  # --- analysis parameters ---
+  emin: 100                     # MeV
+  emax: 316228                  # MeV; 100 * 10^(28/8) places edges on the 8/decade grid
+  enumbins: 28                  # 8 bins/decade over 3.5 decades
+  evclass: 1024                 # ULTRACLEANVETO
+  evtype: 3                     # FRONT+BACK
+  zmax: 90
+  hpx_order: 7
+  hpx_ordering_scheme: "RING"
+  coordsys: "GAL"
+  irfs: "P8R3_ULTRACLEANVETO_V3"   # must stay matched to evclass/evtype
+  # --- paths (absolute, anchored at the repo root so cwd never matters) ---
+  data_dir: ${root:data}
+  scripts_dir: ${root:scripts}
+  counts:   ${vars.data_dir}/counts_${vars.energy_tag}_${vars.selection}_${vars.grid}_${vars.weeks}.fits
+  exposure: ${vars.data_dir}/exposure_${vars.energy_tag}_${vars.selection}_${vars.grid}_${vars.weeks}.fits
+  # Livetime does not depend on energy, so no energy tag in its name
+  livetime: ${vars.data_dir}/livetime_${vars.selection}_${vars.weeks}.fits
+  flux:     ${vars.data_dir}/flux_${vars.energy_tag}_${vars.selection}_${vars.grid}_${vars.weeks}.fits
+
+# 1. Resource Configuration
+resources:
+  # Reuse chunk livetime cubes across runs. gtltcube dominates pipeline CPU
+  # (~87% measured) and its output does NOT depend on energy binning or map
+  # geometry - re-binning runs skip it entirely. Safe to delete the dir anytime.
+  ltcube_cache:
+    enabled: true
+    path: ${root:ltcube_cache}
+  # Merge finished livetime cubes in the background during processing
+  stream_merge: true
+  # Number of cores to use ("auto" = CPU count).
+  #
+  # DO NOT set this to "auto" on owl46. It reports 384 logical CPUs, and running
+  # 384 workers makes every task stall on RAM-disk/memory pressure: measured on
+  # the full 934-week set, the SAME work took 766,268 task-seconds at 384 workers
+  # vs 6,224 at 128 - a 123x per-task inflation, and 2111s vs 80s wall. The
+  # per-step profile is the tell: at 384 every tool converged on ~270-290s
+  # regardless of its actual cost (gtmktime, the cheapest, inflated 364x).
+  # 128 workers ran at 90% parallel efficiency (116 of 128 effective).
+  cores: 128
+  # RAM disk settings
+  ram_disk:
+    enabled: true
+    # Path to mount/use (will be cleaned up after use unless keep=true)
+    path: "/dev/shm/fermi_processing"
+    # Minimum RAM required (GB) to enable RAM disk
+    min_ram_gb: 500
+
+# 2. Input Data Configuration
+input:
+  # Directory containing source files
+  directory: ${root:../weekly/photon}
+  # Glob pattern to match files
+  pattern: "lat_photon_weekly_w*.fits"
+  # Each matching file is processed as its own job (one week -> one job). This is
+  # fixed by design: the ltcube cache, empty-week skipping and streamed merges are
+  # all per-week, so there is no grouping option.
+
+# Common Files (Cached to RAM in parallel mode for speed)
+common_files:
+  scfile: ${root:../mission/spacecraft/lat_spacecraft_merged.fits}
+
+# 3. Processing Steps
+# Define the chain of commands to run on each input group.
+# Keywords {input} and {output} are automatically handled.
+# You can define custom intermediate tags like {temp_gti} if a step produces named outputs used by later steps.
+#
+# Analysis settings (P8R3, ULTRACLEANVETO baseline):
+#   - Event class: ULTRACLEANVETO, evclass=1024 (benchmark alternative: SOURCEVETO, evclass=2048)
+#   - Event type: evtype=3 (FRONT+BACK) to start; PSF types (4/8/16/32) can be split out later
+#   - IRF: P8R3_ULTRACLEANVETO_V3 (must stay matched to evclass/evtype above, see gtexpcube2 below)
+#   - Energy range: 100 MeV - 316 GeV, 8 bins/decade = 28 bins (emin/emax in MeV, per Ftools convention)
+steps:
+  - name: "gtselect"
+    command: >
+      gtselect evclass=${vars.evclass} evtype=${vars.evtype}
+      infile={input}
+      outfile={temp_select}
+      ra=0 dec=0 rad=180
+      tmin=INDEF tmax=INDEF
+      emin=${vars.emin} emax=${vars.emax}
+      zmax=${vars.zmax}
+    outputs:
+      - "{temp_select}" # Intermediate file
+
+  - name: "gtmktime"
+    # Uses the output from the previous step ({temp_select}) as input
+    command: >
+      gtmktime
+      scfile={scfile}
+      filter="(DATA_QUAL>0)&&(LAT_CONFIG==1)"
+      roicut=no
+      evfile={temp_select}
+      outfile={temp_gti}
+    outputs:
+      - "{temp_gti}" # Intermediate file
+    cleanup:
+      - "{temp_select}" # Delete the previous step's output to save space
+
+  - name: "gtbin_healpix"
+    # Branch 1: Create Counts Cube from GTI, HEALPix binning (nside=128, RING order -> hpx_order=7)
+    # Parameter names verified against gtbin.par: the coordinate system is the
+    # plain 'coordsys' parameter (there is no hpx_coordsys). hpx_ebin/hpx_region
+    # are passed explicitly so gtbin never prompts when running under nohup.
+    # Energy: 8 bins/decade over 100 MeV - 316 GeV -> enumbins=28.
+    command: >
+      gtbin
+      algorithm=HEALPIX
+      evfile={temp_gti}
+      outfile={chunk_hpxcube}
+      scfile={scfile}
+      hpx_ordering_scheme=${vars.hpx_ordering_scheme} hpx_order=${vars.hpx_order} coordsys=${vars.coordsys}
+      hpx_ebin=yes hpx_region=""
+      ebinalg=LOG emin=${vars.emin} emax=${vars.emax} enumbins=${vars.enumbins}
+    outputs:
+      - "{chunk_hpxcube}" # Final chunk output 1
+
+  - name: "gtltcube"
+    # Branch 2: Create Livetime Cube from GTI
+    command: >
+      gtltcube
+      evfile={temp_gti}
+      scfile={scfile}
+      outfile={chunk_ltcube}
+      dcostheta=0.025 binsz=1 phibins=1 zmax=${vars.zmax}
+    outputs:
+      - "{chunk_ltcube}" # Final chunk output 2
+    cleanup:
+      - "{temp_gti}" # Cleanup GTI after both branches are done using it
+
+# 4. Merging Configuration
+# Define how to merge the results from all parallel chunks.
+# Output naming convention: {product}_{energy}_{selection}_{grid}_{week range}.fits
+# Keep the names in sync with the actual step parameters (emin/emax, zmax, hpx order)
+# and update the week range (e.g. w009-w947) to match your input data.
+merging:
+  - name: "merge_hpxcubes"
+    input_pattern: "{chunk_hpxcube}"
+    output_file: ${vars.counts}
+    # 'image_sum': Sums the image data (numpy) - good for counts maps
+    strategy: "image_sum"
+
+  - name: "merge_ltcubes"
+    input_pattern: "{chunk_ltcube}"
+    # Livetime does not depend on energy, so no energy range in the name
+    output_file: ${vars.livetime}
+    # 'hierarchical': Uses gtltsum in a binary tree fashion (efficient for many large files)
+    strategy: "hierarchical"
+    tool: "gtltsum" # Tool to use for the binary merge
+
+# 5. Post-Processing
+# Steps to run ONCE after everything is merged
+post_processing:
+  - name: "gtexpcube2"
+    # Exposure on the SAME grid as the merged counts map. cmap provides the energy
+    # binning, but hpx_order must ALSO be passed explicitly (it's a hidden param
+    # defaulting to 6, i.e. nside 64 - verified: cmap alone does not override it).
+    # bincalc=CENTER -> one exposure plane per counts energy bin, which is what
+    # the flux division needs. The nxpix/binsz/xref/... values are ignored when
+    # cmap is given but are passed so nothing prompts under nohup.
+    # Energy binning MUST match gtbin_healpix above (8/decade, 28 bins).
+    # parallel_expcube.py runs one gtexpcube2 per energy bin in parallel and
+    # stacks the planes (verified bit-identical to a monolithic run).
+    command: >
+      python3 ${vars.scripts_dir}/parallel_expcube.py
+      infile=${vars.livetime}
+      cmap=${vars.counts}
+      outfile=${vars.exposure}
+      irfs=${vars.irfs}
+      evtype=${vars.evtype}
+      bincalc=CENTER
+      hpx_ordering_scheme=${vars.hpx_ordering_scheme} hpx_order=${vars.hpx_order}
+      nxpix=1 nypix=1 binsz=1 coordsys=${vars.coordsys} xref=0 yref=0 axisrot=0 proj=AIT
+      emin=${vars.emin} emax=${vars.emax} enumbins=${vars.enumbins} ebinfile=NONE
+
+  - name: "flux_division"
+    # flux = counts / exposure. Uses hpx_divide.py instead of farith because
+    # farith only handles image HDUs - HEALPix maps are binary tables.
+    command: >
+      python3 ${vars.scripts_dir}/hpx_divide.py
+      ${vars.counts}
+      ${vars.exposure}
+      ${vars.flux}
+
+# 6. Science Model References (not yet wired into any pipeline step)
+# This pipeline currently stops at counts/exposure/flux maps - there is no
+# likelihood-fitting stage (gtsrcmaps/gtdiffrsp/gtlike). These paths are recorded
+# here so they're ready to plug into such a stage if/when one is added.
+science_models:
+  galactic_diffuse: "gll_iem_v07.fits"
+  isotropic: "iso_P8R3_ULTRACLEANVETO_V3_v1.txt"  # match to evclass/evtype; use per-PSF-type files if splitting by PSF later
+  point_source_catalog: "4FGL-DR4"  # TODO: decide mask vs. include-as-component when a likelihood stage exists
+  # TODO Sun/Moon removal: no direct gtselect/gtmktime flag covers this for all-sky
+  # data - it's normally an angular-separation cut against ephemeris positions.
+  # Needs a dedicated filtering step (e.g. via gtltcube's moving-source handling or
+  # a custom script) before it can be added here.

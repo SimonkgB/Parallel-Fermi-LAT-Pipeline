@@ -1,0 +1,14 @@
+# Runtime dependencies of the pipeline.
+#
+# All pure Python; install alongside the fermitools conda/micromamba env, e.g.
+#     micromamba install -n fermi -c conda-forge omegaconf pyyaml astropy healpy
+#
+# The Fermi Science Tools themselves (gtselect, gtmktime, gtbin, gtltcube,
+# gtltsum, gtexpcube2) are NOT pip-installable and must come from that env;
+# see README.md and the 'fermi_base' key in configs/.
+
+omegaconf       # ${...} interpolation in configs/*.yaml
+PyYAML          # benchmark.py writes a derived config; re-exec shim reads fermi_base
+astropy         # FITS I/O for image_sum merging, GTI handling, scfile slicing
+numpy           # map accumulation and GTI arrays
+healpy          # HEALPix handling in analysis.py

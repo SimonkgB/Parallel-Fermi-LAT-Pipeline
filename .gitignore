@@ -18,7 +18,6 @@ multi_1.sh
 check_events.sh
 test_diagnostic.sh
 test_ftmerge.sh
-clean.sh
 kill.sh
 monitor.sh
 RUN_DETACHED.sh
@@ -31,6 +30,8 @@ pfiles/
 
 scripts/check_events.sh
 scripts/hpx_divide.py
-scripts/parallel_expcube.py
+#scripts/parallel_expcube.py
 scripts/test_diagnostics.sh
 scripts/validate.py
+benchmark.py
+analysis.py

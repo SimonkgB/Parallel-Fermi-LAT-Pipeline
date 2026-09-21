@@ -28,3 +28,9 @@ RUN_DETACHED.sh
 
 # Parameter files
 pfiles/
+
+scripts/check_events.sh
+scripts/hpx_divide.py
+scripts/parallel_expcube.py
+scripts/test_diagnostics.sh
+scripts/validate.py

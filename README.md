@@ -5,10 +5,7 @@ A parallel processing pipeline for Fermi LAT data analysis using Ftools. Massive
 ## Prerequisites
 
 - Python 3.6+
-- Fermi Science Tools (`fermitools`) installed via conda/mamba
-- PyYAML (`pip install pyyaml`)
-- Astropy (optional, for `image_sum` merge)
-
+- A Conda-compatible package manager 
 - Depending on usage, large amounts of RAM may be required
 
 ## Project Structure
@@ -85,6 +82,3 @@ under the one in `fermi_base`.
 ## Inspiration/credits
 The example yaml and currently working pipeline take complete inspiration of the great work of the Fermi ScienceTools team: https://github.com/fermi-lat/ScienceTools
 
-## License
-
-MIT

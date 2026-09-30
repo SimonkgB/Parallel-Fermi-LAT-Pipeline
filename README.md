@@ -33,6 +33,11 @@ A parallel processing pipeline for Fermi LAT data analysis using Ftools. Massive
 
 ### Configure your environment
 
+```yaml
+mcromamba create -n fermi -c conda-forge -c fermi fermi-scitools
+micromamba activate fermi
+```
+
 Set the `fermi_base` key in `configs/fermi_pipeline.yaml` to your fermitools conda/micromamba environment (no code editing needed):
 
 ```yaml

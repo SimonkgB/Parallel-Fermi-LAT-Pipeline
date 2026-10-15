@@ -52,7 +52,7 @@ resources:
     enabled: true
     path: "./ltcube_cache"
   # Number of cores to use (defaults to CPU count if not specified or "auto")
-  cores: auto
+  cores: 192
   # RAM disk settings
   ram_disk:
     enabled: true
@@ -73,7 +73,7 @@ input:
   # its weekly file is still growing. The range also sets the w...-w... part of
   # the product names, so names always match the data used. 9-947 reproduces
   # the production cube of 2026-07 (week 512, the 2018 safe-hold, does not exist).
-  weeks: "9-947"
+  weeks: "9-958"
 
 # Weekly spacecraft (FT2) files, matched to the selected photon weeks. The run
 # merges them itself into lat_spacecraft_merged_w<first>-w<last>.fits in

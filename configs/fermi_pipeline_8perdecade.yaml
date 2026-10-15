@@ -33,7 +33,7 @@ vars:
   energy_tag: ${energy_tag:${vars.emin},${vars.emax},${vars.enumbins}}
   selection: ${selection_tag:${vars.zmax}}
   grid: ${grid_tag:${vars.hpx_order},${vars.coordsys}}
-  weeks: ${week_tag:${input.directory},${input.pattern}}
+  weeks: ${week_tag:${input.directory},${input.pattern},${input.weeks}}
 
   counts:    ${vars.data_dir}/counts_${vars.energy_tag}_${vars.selection}_${vars.grid}_${vars.weeks}.fits
   exposure:  ${vars.data_dir}/exposure_${vars.energy_tag}_${vars.selection}_${vars.grid}_${vars.weeks}.fits
@@ -41,7 +41,7 @@ vars:
   flux:      ${vars.data_dir}/flux_${vars.energy_tag}_${vars.selection}_${vars.grid}_${vars.weeks}.fits
 
 
-fermi_base: "/mn/stornext/d5/data/skgberg/micromamba/envs/fermi"
+fermi_base: "/mn/stornext/d5/data/skgberg/software/micromamba/envs/fermi"
 
 ##########################
 # Resource Configuration #
@@ -70,13 +70,20 @@ resources:
 ############################
 input:
   # Directory containing source files
-  directory: ${root:../weekly/photon}
+  directory: "/mn/stornext/d23/cmbco/globe/fermi/photon"
   # Glob pattern to match files
   pattern: "lat_photon_weekly_w*.fits"
+  # Inclusive week range ("" = every file found). Leave out the current week:
+  # its weekly file is still growing. The range also sets the w...-w... part of
+  # the product names, so names always match the data used. 9-947 reproduces
+  # the production cube of 2026-07 (week 512, the 2018 safe-hold, does not exist).
+  weeks: "9-947"
 
 # Common Files (Cached to RAM in parallel mode for speed)
 common_files:
-  scfile: ${root:../mission/spacecraft/lat_spacecraft_merged.fits}
+  # Merged spacecraft (FT2) file; it must cover every selected week. It is
+  # built from the weekly FT2 files in the same directory.
+  scfile: "/mn/stornext/d23/cmbco/globe/fermi/spacecraft/lat_spacecraft_merged.fits"
 
 
 ####################

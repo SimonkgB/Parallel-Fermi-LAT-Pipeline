@@ -15,11 +15,12 @@ A parallel processing pipeline for Fermi LAT data analysis using Ftools. Massive
 │   ├── parallel_run.py        # Main parallel pipeline runner
 │   └── single_run.py          # Single-core baseline runner (for benchmarking)
 ├── configs/
-│   └── fermi_pipeline.yaml    # Pipeline configuration
+│   └── fermi_pipeline_8perdecade.yaml  # Pipeline configuration
 ├── scripts/
 │   ├── run_background.sh      # Background execution wrapper
 │   ├── kill.sh                # Kill all running instances of the pipeline
 │   ├── clean.sh               # Remove generated outputs/logs
+│   ├── hpx_divide.py          # flux = counts / exposure for HEALPix maps (post-processing)
 │   └── parallel_expcube.py    # Energy-parallel gtexpcube2 (one process per bin)
 ├── ltcache/                   # Cache to store the LTCube 
 ├── logs/                      # All runtime logs end up here
@@ -34,11 +35,11 @@ A parallel processing pipeline for Fermi LAT data analysis using Ftools. Massive
 ### Configure your environment
 
 ```yaml
-mcromamba create -n fermi -c conda-forge -c fermi fermi-scitools
+micromamba create -n fermi -c conda-forge -c fermi fermi-scitools
 micromamba activate fermi
 ```
 
-Set the `fermi_base` key in `configs/fermi_pipeline.yaml` to your fermitools conda/micromamba environment (no code editing needed):
+Set the `fermi_base` key in `configs/fermi_pipeline_8perdecade.yaml` to your fermitools conda/micromamba environment (no code editing needed):
 
 ```yaml
 fermi_base: "/path/to/your/micromamba/envs/fermi"
@@ -50,13 +51,13 @@ If omitted, it is derived automatically from the location of `gtselect` when the
 
 ```bash
 # Dry run (preview commands without executing)
-python3 runners/parallel_run.py configs/fermi_pipeline.yaml --dry-run
+python3 runners/parallel_run.py configs/fermi_pipeline_8perdecade.yaml --dry-run
 
 # Full run
-python3 runners/parallel_run.py configs/fermi_pipeline.yaml
+python3 runners/parallel_run.py configs/fermi_pipeline_8perdecade.yaml
 
 # Background execution
-./scripts/run_background.sh configs/fermi_pipeline.yaml
+./scripts/run_background.sh configs/fermi_pipeline_8perdecade.yaml
 ```
 
 Logs are written to `logs/` (`runner.log`, `pipeline_execution.log`, ...).

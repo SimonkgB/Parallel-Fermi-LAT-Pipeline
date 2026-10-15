@@ -160,6 +160,9 @@ class Logger:
         """
         self.log_file = log_file
         self.start_time = time.time()
+        # Every error() is counted: main() exits non-zero if any happened, so a
+        # run that logged an ERROR can never look like a clean finish.
+        self.n_errors = 0
         if self.log_file:
             # Make sure the directory for the log file exists (e.g. logs/)
             log_dir = os.path.dirname(self.log_file)
@@ -181,6 +184,7 @@ class Logger:
                 f.write(msg_str + "\n")
 
     def error(self, message):
+        self.n_errors += 1
         self.log(f"ERROR: {message}")
 
 
@@ -249,6 +253,127 @@ def validate_config(config, logger=None):
                 break
 
 
+WEEK_RE = re.compile(r"_w(\d+)_")
+
+
+def parse_week_range(weeks):
+    """'9-947' -> (9, 947); '' or None -> (None, None), meaning every week found."""
+    if weeks is None:
+        return None, None
+    weeks = str(weeks).strip()
+    if weeks == "":
+        return None, None
+
+    lo_text, _, hi_text = weeks.partition("-")
+    lo = None
+    hi = None
+    if lo_text.strip() != "":
+        lo = int(lo_text)
+    if hi_text.strip() != "":
+        hi = int(hi_text)
+    return lo, hi
+
+
+def week_number(path):
+    """Week number from a weekly file name (..._w0123_...), or None."""
+    match = WEEK_RE.search(Path(path).name)
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def select_input_files(directory, pattern, weeks=""):
+    """Input files matching `pattern`, restricted to the inclusive week range.
+
+    This is the single source of truth for which weeks a run uses: both
+    discover_files() and the '${week_tag:...}' name resolver call it, so the
+    product file names can never disagree with the data that went into them.
+    Files whose name carries no week number are kept only when no range is given.
+    """
+    lo, hi = parse_week_range(weeks)
+    selected = []
+    for path in sorted(Path(directory).glob(pattern)):
+        week = week_number(path)
+        if week is None:
+            if lo is None and hi is None:
+                selected.append(path)
+            continue
+        if lo is not None and week < lo:
+            continue
+        if hi is not None and week > hi:
+            continue
+        selected.append(path)
+    return selected
+
+
+def same_size_and_mtime(source, copy):
+    """True if `copy` exists and has the size and mtime of `source`."""
+    if not os.path.exists(copy):
+        return False
+    source_stat = os.stat(source)
+    copy_stat = os.stat(copy)
+    if source_stat.st_size != copy_stat.st_size:
+        return False
+    if int(source_stat.st_mtime) != int(copy_stat.st_mtime):
+        return False
+    return True
+
+
+def energy_label(mev):
+    """100 -> '100MeV', 316228 -> '316GeV'."""
+    mev = float(mev)
+    if mev >= 1000:
+        return f"{mev / 1000:.0f}GeV"
+    return f"{mev:.0f}MeV"
+
+
+def resolve_root(*parts):
+    """${root:data} -> <repo>/data, so config paths never depend on the cwd."""
+    return os.path.normpath(str(REPO_ROOT.joinpath(*parts)))
+
+
+def resolve_energy_tag(emin, emax, enumbins):
+    """100, 316228, 28 -> '100MeV-316GeV-8pd' (bins per decade)."""
+    import math
+    bins_per_decade = float(enumbins) / math.log10(float(emax) / float(emin))
+    return f"{energy_label(emin)}-{energy_label(emax)}-{bins_per_decade:.0f}pd"
+
+
+def resolve_selection_tag(zmax):
+    """90 -> 'zmax90'."""
+    return f"zmax{float(zmax):g}"
+
+
+def resolve_grid_tag(hpx_order, coordsys=""):
+    """7 -> 'hpx128' (nside = 2^order)."""
+    return f"hpx{2 ** int(hpx_order)}"
+
+
+def resolve_week_tag(directory, pattern, weeks=""):
+    """'w009-w947': the first and last week the run actually selects."""
+    numbers = []
+    for path in select_input_files(directory, pattern, weeks):
+        week = week_number(path)
+        if week is not None:
+            numbers.append(week)
+    if not numbers:
+        return "wNONE"
+    numbers.sort()
+    return f"w{numbers[0]:03d}-w{numbers[-1]:03d}"
+
+
+# Resolvers the configs use ('${root:...}', '${energy_tag:...}', ...). The four
+# *_tag resolvers used to be referenced by the config but never registered, so
+# loading it failed with "Unsupported interpolation type energy_tag".
+CONFIG_RESOLVERS = {
+    "root": resolve_root,
+    "energy_tag": resolve_energy_tag,
+    "selection_tag": resolve_selection_tag,
+    "grid_tag": resolve_grid_tag,
+    "week_tag": resolve_week_tag,
+}
+
+
 class ConfigLoader:
     @staticmethod
     def load(path, logger=None):
@@ -262,11 +387,9 @@ class ConfigLoader:
         str.format placeholders ('{input}', '{temp_gti}'): interpolation is
         fully resolved here, long before any .format() call.
         """
-        if not OmegaConf.has_resolver("root"):
-            # ${root:data} -> <repo>/data, so config paths never depend on cwd.
-            OmegaConf.register_new_resolver(
-                "root", lambda *p: os.path.normpath(str(REPO_ROOT.joinpath(*p)))
-            )
+        for name, resolver in CONFIG_RESOLVERS.items():
+            if not OmegaConf.has_resolver(name):
+                OmegaConf.register_new_resolver(name, resolver)
         cfg = OmegaConf.load(path)
         config = OmegaConf.to_container(cfg, resolve=True)  # -> plain dict, picklable
         validate_config(config, logger)
@@ -289,6 +412,18 @@ class RAMDiskManager:
         self.min_ram = self.config.get('min_ram_gb', 0)
         self.logger = logger
         self.initialized = False
+
+    def keep_files(self):
+        """True if the config asks to keep intermediate files.
+
+        The configs call the key 'keep'; older code read 'keep_intermediate'.
+        Both are honoured.
+        """
+        if self.config.get('keep', False):
+            return True
+        if self.config.get('keep_intermediate', False):
+            return True
+        return False
 
     def setup(self):
         if not self.enabled:
@@ -322,7 +457,7 @@ class RAMDiskManager:
             return
         if self.initialized and os.path.exists(self.path):
             # Will only run if RAM disk was initialized and exists thus rsynced files are there
-            if self.config.get('keep_intermediate', False):
+            if self.keep_files():
                 # If we are asked to keep the intermediate files, we will just log it
                 self.logger.log(f"Keeping RAM disk at {self.path} (as requested).")
             else:
@@ -358,12 +493,20 @@ class JobScheduler:
         self.cores = int(self.cores)
 
     def discover_files(self):
-        # Finds all files matching the pattern in the input directory
-        source_path = Path(self.input_dir)
-        files = sorted(source_path.glob(self.pattern))
+        # Finds all files matching the pattern in the input directory, restricted
+        # to the optional input.weeks range (e.g. "9-947"). Use the range to leave
+        # out the current week: its weekly file is still growing.
+        weeks = self.config['input'].get('weeks', '')
+        files = select_input_files(self.input_dir, self.pattern, weeks)
         if not files:
-            raise FileNotFoundError(f"No files found matching {self.pattern} in {self.input_dir}")
-        self.logger.log(f"Found {len(files)} input files.")
+            message = f"No files found matching {self.pattern} in {self.input_dir}"
+            if weeks:
+                message += f" for weeks {weeks}"
+            raise FileNotFoundError(message)
+        if weeks:
+            self.logger.log(f"Found {len(files)} input files (weeks {weeks}).")
+        else:
+            self.logger.log(f"Found {len(files)} input files.")
         return files
 
     def prepare_environment(self, files):
@@ -396,9 +539,17 @@ class JobScheduler:
                 for key, path in common_files.items():
                     filename = os.path.basename(path)
                     dest = os.path.join(ram_common_dir, filename)
-                    # Copy if not exists
-                    if not dry_run and not os.path.exists(dest):
-                         shutil.copy(path, dest) # Standard copy for single large file
+                    # Copy unless an IDENTICAL copy is already there. A file of the
+                    # same name left by an earlier run may be an older spacecraft
+                    # file; reusing it would silently cut the GTIs and livetime.
+                    # copy2 keeps the mtime, so size + mtime identify the source.
+                    if not dry_run:
+                        if same_size_and_mtime(path, dest):
+                            self.logger.log(f"  {filename}: reusing identical RAM-disk copy")
+                        else:
+                            if os.path.exists(dest):
+                                self.logger.log(f"  {filename}: RAM-disk copy differs from the source - recopying")
+                            shutil.copy2(path, dest)
                     common_file_context[key] = dest
                 self.logger.log("Common files cached." if not dry_run
                                 else "[DryRun] Would cache common files "
@@ -622,11 +773,24 @@ class JobScheduler:
         results = []
         total_tasks = len(tasks)
         completed = 0
+        contributors = {}     # output key -> set of chunk ids that produced it
+        skipped_weeks = []    # weeks the tools reported as empty
 
         try:
             with worker_pool(self.cores) as pool:
                 # Use imap_unordered to track progress as tasks finish
                 for result in pool.imap_unordered(execute_worker, tasks):
+                    # Record which chunks produced which outputs BEFORE the
+                    # image_sum outputs are handed off and cleared below; the
+                    # merge phase checks that every merged product (counts,
+                    # livetime) is built from the same set of weeks.
+                    if result.get('success'):
+                        for key, paths in result.get('outputs', {}).items():
+                            if paths:
+                                contributors.setdefault(key, set()).add(result['id'])
+                        for name in result.get('skipped', []):
+                            skipped_weeks.append(name)
+
                     # Hand image_sum chunk outputs to the accumulators (or fold them
                     # in inline as fallback) so they are summed and freed immediately.
                     if result.get('success') and image_sum_keys:
@@ -705,7 +869,9 @@ class JobScheduler:
                 for b, batch, job in sorted(st['jobs'], key=lambda x: x[0]):
                     out_path, err = job.get()
                     if err:
-                        self.logger.error(f"Streamed merge batch failed - retrying its chunks in the merge phase: {err}")
+                        # Not an error yet: the chunks are retried in the merge
+                        # phase, which aborts the run if they fail again.
+                        self.logger.log(f"WARNING: streamed merge batch failed - retrying its chunks in the merge phase: {err}")
                         retry.extend(batch)
                     else:
                         batch_outs.append(out_path)
@@ -727,20 +893,31 @@ class JobScheduler:
         if hits or stored:
             self.logger.log(f"Ltcube cache: {hits} hits, {stored} newly stored.")
 
-        # Basic Error Checking
-        failed = [r for r in results if not r['success']]
+        # Weeks the tools reported as having no usable data (e.g. LAT safe-hold
+        # weeks). Legitimate, but they must be visible in runner.log, not only
+        # in the workers' stdout.
+        if skipped_weeks:
+            skipped_weeks.sort()
+            self.logger.log(f"{len(skipped_weeks)} week(s) skipped as empty (no good-quality time): "
+                            + ", ".join(skipped_weeks))
+
+        # Any failed chunk aborts the run before merging. A merged map that is
+        # missing some weeks is not a smaller valid product: the counts and the
+        # livetime/exposure would no longer describe the same data.
+        failed = []
+        for res in results:
+            if not res['success']:
+                failed.append(res)
         if failed:
-            self.logger.error(f"{len(failed)} chunks failed.")
+            self.logger.error(f"{len(failed)} of {len(tasks)} chunks failed. Aborting before the merge phase.")
             for res in failed:
-                 self.logger.log(f"Chunk {res['id']} error: {res['error']}")
-            
-            # If significant failures, ABORT to prevent zombie merging
-            if len(failed) > len(tasks) * 0.5:
-                self.logger.error("Too many chunks failed (>50%). Aborting pipeline before merge phase.")
-                # Ensure cleanup happens before we exit!
-                self.ram_disk.cleanup()
-                self.cleanup_workdir()
-                sys.exit(1)
+                self.logger.log(f"Chunk {res['id']} error: {res['error']}")
+            raise RuntimeError(f"{len(failed)} chunks failed")
+
+        # Every merged product must come from the same chunks (weeks).
+        self._contributors = contributors
+        if not self.config.get('selected_steps') and not self.config.get('dry_run', False):
+            self.check_same_contributors(contributors)
 
         # Merge
         t_phase = time.time()
@@ -766,6 +943,40 @@ class JobScheduler:
         # Performance Breakdown
         self.print_performance_stats(results, len(working_files), phase_times)
 
+    def check_same_contributors(self, contributors):
+        """Raise if the merged products would come from different weeks.
+
+        Each merge step names its chunk outputs (e.g. chunk_hpxcube for the
+        counts, chunk_ltcube for the livetime). If a week produced one but not
+        the other, the counts and the exposure would cover different time
+        and every flux derived from them would be silently biased.
+        """
+        keys = []
+        for merge_step in self.config.get('merging', []):
+            keys.append(merge_step['input_pattern'].strip("{}"))
+        if len(keys) < 2:
+            return
+
+        reference_key = keys[0]
+        reference = contributors.get(reference_key, set())
+        for key in keys[1:]:
+            other = contributors.get(key, set())
+            if other == reference:
+                continue
+            only_reference = sorted(reference - other)
+            only_other = sorted(other - reference)
+            self.logger.error(f"Merged products would cover different weeks: "
+                              f"{len(reference)} chunks made {reference_key}, {len(other)} made {key}; "
+                              f"only {reference_key}: {only_reference[:10]}, only {key}: {only_other[:10]}")
+            raise RuntimeError(f"{reference_key} and {key} come from different chunks")
+        self.logger.log(f"All {len(keys)} merged products come from the same {len(reference)} chunks.")
+
+    def cleanup(self):
+        """Remove the RAM disk / scratch dir (also called when a run aborts,
+        so a failed run does not leave hundreds of GB in /dev/shm)."""
+        self.ram_disk.cleanup()
+        self.cleanup_workdir()
+
     def cleanup_workdir(self):
         """Remove the temporary scratch dir used when no RAM disk is active.
 
@@ -777,9 +988,8 @@ class JobScheduler:
         workdir = getattr(self, 'working_dir', None)
         if not workdir or not os.path.exists(workdir):
             return
-        # Respect the same keep_intermediate flag as the RAM disk
-        keep = self.config.get('resources', {}).get('ram_disk', {}).get('keep_intermediate', False)
-        if keep:
+        # Respect the same keep flag as the RAM disk
+        if self.ram_disk.keep_files():
             self.logger.log(f"Keeping intermediate files at {workdir} (as requested).")
         else:
             self.logger.log(f"Cleaning up scratch dir {workdir}")
@@ -866,7 +1076,8 @@ class JobScheduler:
         dead = [p for p in accum_procs if p.exitcode != 0]
         if dead:
             self.logger.error(f"{len(dead)} accumulator process(es) exited abnormally - "
-                              f"image_sum totals may be incomplete.")
+                              f"image_sum totals are incomplete.")
+            raise RuntimeError("image_sum accumulator died")
 
         for key in image_sum_keys:
             total, count, template = None, 0, None
@@ -899,6 +1110,12 @@ class JobScheduler:
     def write_accumulated_image_sum(self, key, output_file):
         """Write the incrementally-accumulated image_sum total to output_file."""
         acc = self._img_accum[key]
+        # An accumulator that failed on a file only printed it and moved on, so
+        # the total could be missing weeks. Compare with the chunks that made one.
+        expected = len(getattr(self, '_contributors', {}).get(key, set()))
+        if expected and acc['count'] != expected:
+            self.logger.error(f"{key}: summed {acc['count']} chunk maps but {expected} chunks produced one")
+            raise RuntimeError(f"image_sum of {key} is missing chunks")
         self.logger.log(f"Writing incrementally-merged {key}: {acc['count']} chunks -> {output_file}")
         write_map_data(acc['template'], acc['map_ext'], acc['data'])
         # Union of every chunk's GTI, not the first chunk's (see merge_gti_rows).
@@ -1000,6 +1217,7 @@ class JobScheduler:
             os.remove(list_file)
         except Exception as e:
             self.logger.error(f"ftmerge failed: {e}")
+            raise
 
     def merge_image_sum(self, files, output_file):
         """Merge FITS images by pixel-wise summation using astropy.
@@ -1050,6 +1268,7 @@ class JobScheduler:
 
         except Exception as e:
             self.logger.error(f"Image sum failed: {e}")
+            raise
 
     def merge_hierarchical(self, files, output_file, tool='gtltsum'):
         """Merge files in a tree-reduction pattern using a pairwise tool.
@@ -1099,17 +1318,19 @@ class JobScheduler:
             else:
                 outcomes = [merge_batch_worker(t) for t in batch_tasks]
 
-            # Keep successful batch outputs; log (but don't abort on) failed ones
+            # A failed batch aborts the merge. Skipping it (the old behaviour)
+            # dropped up to 8 weeks from the livetime cube while the counts map
+            # kept them, which biases the exposure low with only a log line.
             next_files = []
+            n_failed = 0
             for out_path, err in outcomes:
                 if err:
-                    self.logger.error(f"Merge batch failed (skipping its files): {err}")
+                    self.logger.error(f"Merge batch failed in stage {stage}: {err}")
+                    n_failed += 1
                 elif out_path:
                     next_files.append(out_path)
-
-            if not next_files:
-                self.logger.error(f"All batches failed in merge stage {stage}; aborting hierarchical merge for {output_file}")
-                return
+            if n_failed > 0:
+                raise RuntimeError(f"{n_failed} merge batch(es) failed in stage {stage} for {output_file}")
 
             # Remove the previous stage's temp inputs (not the original chunks at stage 1)
             if stage > 1:
@@ -1140,7 +1361,10 @@ class JobScheduler:
                 else:
                     subprocess.run(step['command'], shell=True, check=True)
             except subprocess.CalledProcessError as e:
+                # Later steps use this step's output (flux needs the exposure),
+                # so stop here instead of running them on a missing file.
                 self.logger.error(f"Post-processing step {step['name']} failed: {e}")
+                raise
 
 
 LTCUBE_CACHE_VERSION = "v1"
@@ -1230,6 +1454,7 @@ def execute_worker(task):
     chunk_outputs = {}
     timings = {}
     cache_stats = [0, 0]  # [hits, stored]
+    skipped = []          # weeks the tools reported as empty (logged by the parent)
 
     try:
         worker_id = chunk_id
@@ -1349,6 +1574,7 @@ def execute_worker(task):
                                 if "No GTIs found" in stderr or "Zero rows returned" in stderr:
                                     reason = stderr.strip().splitlines()[-1] if stderr.strip() else "empty"
                                     print(f"Worker {chunk_id}: Skipping empty week {file_context['basename']} ({reason})")
+                                    skipped.append(file_context['basename'])
                                     break
                                 else:
                                     # Include stderr in the error message
@@ -1378,7 +1604,7 @@ def execute_worker(task):
                             pass
 
         return {'id': chunk_id, 'success': True, 'outputs': chunk_outputs,
-                'timings': timings, 'ltcube_cache': cache_stats}
+                'timings': timings, 'ltcube_cache': cache_stats, 'skipped': skipped}
 
     except Exception as e:
         return {'id': chunk_id, 'success': False, 'error': str(e)}
@@ -1865,6 +2091,7 @@ def main():
     if args.dry_run:
         logger.log("Running in DRY-RUN mode")
 
+    scheduler = None
     try:
         config = ConfigLoader.load(args.config, logger)
         setup_fermi_environment(logger, config.get('fermi_base'))
@@ -1891,8 +2118,21 @@ def main():
         logger.error(f"Fatal error: {e}")
         import traceback
         traceback.print_exc()
+        # An aborted run must not leave its RAM disk (up to hundreds of GB of
+        # /dev/shm) behind.
+        if scheduler is not None:
+            try:
+                scheduler.cleanup()
+            except Exception as cleanup_error:
+                logger.log(f"Cleanup after the failure also failed: {cleanup_error}")
         # Exit non-zero so run_background.sh / CI can tell a crash from a
         # clean finish (single_run.py already did this; this did not).
+        sys.exit(1)
+
+    # A run that logged any ERROR did not produce trustworthy outputs, even if
+    # it reached the end.
+    if logger.n_errors > 0:
+        logger.log(f"Finished with {logger.n_errors} error(s) - see logs/runner.log")
         sys.exit(1)
 
 

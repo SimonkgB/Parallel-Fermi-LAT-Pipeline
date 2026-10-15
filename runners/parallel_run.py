@@ -1605,12 +1605,33 @@ def write_merged_gti(hdul, gti_rows):
     hdul[[h.name for h in hdul].index('GTI')] = gti_hdu
 
     t0, t1 = float(starts.min()), float(stops.max())
+    total = float((stops - starts).sum())
+    date_obs, date_end = met_to_utc(t0, hdul[0].header), met_to_utc(t1, hdul[0].header)
     for hdu in hdul:
         if 'TSTART' in hdu.header:
             hdu.header['TSTART'] = t0
         if 'TSTOP' in hdu.header:
             hdu.header['TSTOP'] = t1
-    return float((stops - starts).sum())
+        # DATE-OBS/DATE-END and the GTI EXPOSURE (sum of GTIs) also came from
+        # the first chunk only
+        if 'DATE-OBS' in hdu.header:
+            hdu.header['DATE-OBS'] = date_obs
+        if 'DATE-END' in hdu.header:
+            hdu.header['DATE-END'] = date_end
+    if 'EXPOSURE' in hdul['GTI'].header:
+        hdul['GTI'].header['EXPOSURE'] = total
+    return total
+
+
+def met_to_utc(met, header):
+    """Fermi mission elapsed time (s, TT since MJDREF) -> UTC ISO string,
+    matching the DATE-OBS/DATE-END format the Fermi tools write."""
+    from astropy.time import Time, TimeDelta
+    ref = Time(header.get('MJDREFI', 51910), header.get('MJDREFF', 7.428703703703703e-4),
+               format='mjd', scale='tt')
+    t = (ref + TimeDelta(met, format='sec')).utc
+    t.precision = 4
+    return t.isot
 
 
 def find_map_data(hdul):
@@ -1728,6 +1749,87 @@ def seed_system_pfiles(logger):
         logger.log(f"Could not mirror system pfiles locally ({e}) - keeping {sys_part}")
 
 
+def stage_tools_locally(config, logger):
+    """Copy the per-week gtools and their env libraries to local disk and put
+    them first on PATH.
+
+    Each init tool has to spend kernel time mapping the
+    shared libraries. ie measured on 384 cores, a gtselect that fails right after
+    startup took ~25-60 s (vs ~1 s with the same binary + libs on local disk).
+
+    The binaries use RPATH $ORIGIN/../lib, so a copy in <stage>/bin finds the
+    copied libs in <stage>/lib. RPATH is searched before LD_LIBRARY_PATH. Data
+    files (IRFs, ...) still come from the env via its environment variables.
+    A tool whose staged copy does not fully resolve is left out (it runs from
+    the env as before). Runs once in the parent workers inherit PATH.
+    """
+    env_prefix = os.environ.get("CONDA_PREFIX")
+    if not env_prefix:
+        return
+    env_prefix = os.path.realpath(env_prefix)
+
+    tools = set()
+    for st in config.get('steps', []):
+        cmd = st.get('command', '').split()
+        if cmd:
+            tools.add(cmd[0])
+    for m in config.get('merging', []):
+        if m.get('tool'):
+            tools.add(m['tool'])
+
+    stage = os.path.join(tempfile.gettempdir(), "fermi_tools")
+    bin_dir, lib_dir = os.path.join(stage, "bin"), os.path.join(stage, "lib")
+    t0 = time.time()
+    try:
+        os.makedirs(bin_dir, exist_ok=True)
+        os.makedirs(lib_dir, exist_ok=True)
+
+        def stage_file(src, dest):
+            if same_size_and_mtime(src, dest):
+                return
+            # copy to temp + atomic replace so a concurrent pipeline instance
+            # never loads a half-written library
+            tmp_dest = f"{dest}.tmp{os.getpid()}"
+            shutil.copy2(src, tmp_dest)
+            os.replace(tmp_dest, dest)
+
+        staged = []
+        for tool in sorted(tools):
+            src = shutil.which(tool)
+            if not src or not os.path.realpath(src).startswith(env_prefix + os.sep):
+                continue
+            with open(src, 'rb') as fh:
+                if fh.read(4) != b'\x7fELF':
+                    continue  # wrapper script, nothing to stage
+            ldd = subprocess.run(["ldd", src], capture_output=True, text=True)
+            if ldd.returncode != 0:
+                continue
+            for line in ldd.stdout.splitlines():
+                parts = line.split()
+                # "libfoo.so.1 => /path/libfoo.so.1.2 (0x...)"
+                if len(parts) >= 3 and parts[1] == "=>" and parts[2].startswith("/"):
+                    lib_src = os.path.realpath(parts[2])
+                    if lib_src.startswith(env_prefix + os.sep):
+                        stage_file(lib_src, os.path.join(lib_dir, parts[0]))
+            dest = os.path.join(bin_dir, tool)
+            stage_file(os.path.realpath(src), dest)
+
+            # The staged copy must not pull anything from the env any more
+            check = subprocess.run(["ldd", dest], capture_output=True, text=True)
+            if check.returncode != 0 or "not found" in check.stdout or env_prefix in check.stdout:
+                os.remove(dest)
+                logger.log(f"  {tool}: staged copy does not resolve cleanly - using the env copy")
+                continue
+            staged.append(tool)
+
+        if staged:
+            os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+            logger.log(f"Staged {len(staged)} tools on local disk in {time.time()-t0:.1f}s "
+                       f"({', '.join(staged)}) -> {bin_dir}")
+    except Exception as e:
+        logger.log(f"Could not stage tools locally ({e}) - running them from the env")
+
+
 # Marker for transient parameter-file failures under heavy startup bursts;
 # these are worth retrying before failing the whole chunk.
 APE_TRANSIENT_MARKER = "Cannot open parameter file"
@@ -1819,6 +1921,8 @@ def main():
             sys.exit(1)
         raise_fd_limit(logger)
         seed_system_pfiles(logger)
+        if not args.dry_run:
+            stage_tools_locally(config, logger)
 
         # Run options come from the optional 'run:' section of the YAML config.
         # The only CLI flag is --dry-run (preview mode).

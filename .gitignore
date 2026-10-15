@@ -15,8 +15,6 @@ single_runner.log
 # Old scripts (not part of the parallel runner)
 multi.sh
 multi_1.sh
-check_events.sh
-test_diagnostic.sh
 test_ftmerge.sh
 monitor.sh
 RUN_DETACHED.sh
@@ -27,9 +25,6 @@ RUN_DETACHED.sh
 # Parameter files
 pfiles/
 
-scripts/check_events.sh
 #scripts/parallel_expcube.py
-scripts/test_diagnostics.sh
-scripts/validate.py
 benchmark.py
 analysis.py

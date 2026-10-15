@@ -78,7 +78,7 @@ class Logger:
             msg_str += f"[{percent}%] "
         msg_str += f"[{elapsed}s] {message}"
         
-        print(msg_str)
+        print(msg_str, flush=True)
         if self.log_file:
             with open(self.log_file, 'a') as f:
                 f.write(msg_str + "\n")
@@ -1674,6 +1674,9 @@ def make_worker_env():
     parent_pfiles = env.get("PFILES", "")
     sys_part = parent_pfiles.split(";", 1)[1] if ";" in parent_pfiles else ""
     env["PFILES"] = f"{pfiles_dir};{sys_part}" if sys_part else pfiles_dir
+
+    # One thread per tool
+    env["OMP_NUM_THREADS"] = "1"
     return env
 
 

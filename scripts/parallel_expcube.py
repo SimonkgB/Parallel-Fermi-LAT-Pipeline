@@ -37,10 +37,10 @@ import numpy as np
 from astropy.io import fits
 
 # make_worker_env lives with the pipeline runner (private PFILES per worker,
-# without which parallel gtool startups contend on .par file locks);
-# setup_fermi_environment makes standalone runs work outside the pipeline.
+# without which parallel gtool startups contend on .par file locks).
+# Run inside the activated fermitools env (micromamba activate fermi).
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "runners"))
-from parallel_run import (make_worker_env, setup_fermi_environment,  # noqa: E402
+from parallel_run import (make_worker_env, check_fermi_environment,  # noqa: E402
                           seed_system_pfiles, Logger, APE_TRANSIENT_MARKER)
 
 
@@ -109,15 +109,12 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cores", type=int, default=0,
                     help="parallel gtexpcube2 processes (default: min(nbins, cpu_count))")
-    ap.add_argument("--fermi-base", default=None,
-                    help="fermitools env root (only needed standalone, outside the pipeline)")
     ap.add_argument("params", nargs="+", help="gtexpcube2 key=value parameters")
     args = ap.parse_args()
 
-    # No-op when the pipeline already exported CALDB & co.; fixes them up for
-    # standalone use (derived from gtexpcube2's location if --fermi-base unset).
     quiet = Logger(None)
-    setup_fermi_environment(quiet, args.fermi_base)
+    if not check_fermi_environment(quiet):
+        sys.exit(1)
     # Serve .par files from a local mirror: N parallel gtexpcube2 startups all
     # reading syspfiles over a network mount can fail with ape errors.
     seed_system_pfiles(quiet)

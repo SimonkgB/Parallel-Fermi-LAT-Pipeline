@@ -5,9 +5,8 @@ import argparse
 import time
 
 # parallel_run.py lives in the same directory, so import it directly
-from parallel_run import (JobScheduler, ConfigLoader, Logger, setup_fermi_environment,
-                          seed_system_pfiles, preflight_par_check, raise_fd_limit,
-                          REPO_ROOT)
+from parallel_run import (JobScheduler, ConfigLoader, Logger, check_fermi_environment,
+                          seed_system_pfiles, raise_fd_limit, REPO_ROOT)
 
 def main():
     # See parallel_run.main(): config paths and logs are repo-root relative.
@@ -25,11 +24,10 @@ def main():
 
     try:
         config = ConfigLoader.load(args.config, logger)
-        setup_fermi_environment(logger, config.get('fermi_base'))
+        if not check_fermi_environment(logger):
+            sys.exit(1)
         raise_fd_limit(logger)
         seed_system_pfiles(logger)
-        if not preflight_par_check(config, logger):
-            sys.exit(1)
 
         # Force single-core baseline: 1 core, no RAM disk (standard disk I/O)
         if 'resources' not in config:

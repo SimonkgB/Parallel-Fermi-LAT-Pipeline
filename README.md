@@ -34,27 +34,34 @@ A parallel processing pipeline for Fermi LAT data analysis using Ftools. Massive
 
 ### Configure your environment
 
-```yaml
+```bash
 micromamba create -n fermi -c conda-forge -c fermi fermi-scitools
+micromamba install -n fermi -c conda-forge omegaconf
+```
+
+Everything below runs with the env **activated**, which provides the Fermi
+tools, `CALDB`/`PFILES`, and the Python packages:
+
+```bash
 micromamba activate fermi
 ```
 
-Set the `fermi_base` key in `configs/fermi_pipeline_8perdecade.yaml` to your fermitools conda/micromamba environment (no code editing needed):
+In a non-interactive script (e.g. a job on a compute node) initialise the
+shell hook first:
 
-```yaml
-fermi_base: "/path/to/your/micromamba/envs/fermi"
+```bash
+eval "$(micromamba shell hook -s bash)"
+micromamba activate fermi
 ```
-
-If omitted, it is derived automatically from the location of `gtselect` when the fermi env is activated. Stale `CALDB`/`PFILES` environment variables pointing to nonexistent paths are detected and corrected at startup.
 
 ### Run the pipeline
 
 ```bash
 # Dry run (preview commands without executing)
-python3 runners/parallel_run.py configs/fermi_pipeline_8perdecade.yaml --dry-run
+python runners/parallel_run.py configs/fermi_pipeline_8perdecade.yaml --dry-run
 
 # Full run
-python3 runners/parallel_run.py configs/fermi_pipeline_8perdecade.yaml
+python runners/parallel_run.py configs/fermi_pipeline_8perdecade.yaml
 
 # Background execution
 ./scripts/run_background.sh configs/fermi_pipeline_8perdecade.yaml
@@ -79,10 +86,8 @@ run:
   skip_post: false              # Skip post-processing
 ```
 
-`scripts/run_background.sh` is the supported launcher (it puts the fermitools `bin`
-dirs on `PATH` and initialises HEASoft). You can also call `runners/parallel_run.py`
-directly with any Python: if that interpreter lacks `omegaconf`, it re-execs itself
-under the one in `fermi_base`.
+`scripts/run_background.sh` starts the same command detached (`nohup`), from the
+activated env.
 
 
 ## Inspiration/credits

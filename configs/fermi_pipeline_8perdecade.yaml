@@ -41,8 +41,6 @@ vars:
   flux:      ${vars.data_dir}/flux_${vars.energy_tag}_${vars.selection}_${vars.grid}_${vars.weeks}.fits
 
 
-fermi_base: "/mn/stornext/d5/data/skgberg/software/micromamba/envs/fermi"
-
 ##########################
 # Resource Configuration #
 ##########################
@@ -53,8 +51,6 @@ resources:
   ltcube_cache:
     enabled: true
     path: "./ltcube_cache"
-  # Merge finished livetime cubes in the background during processing
-  stream_merge: true
   # Number of cores to use (defaults to CPU count if not specified or "auto")
   cores: auto
   # RAM disk settings
@@ -79,11 +75,19 @@ input:
   # the production cube of 2026-07 (week 512, the 2018 safe-hold, does not exist).
   weeks: "9-947"
 
-# Common Files (Cached to RAM in parallel mode for speed)
-common_files:
-  # Merged spacecraft (FT2) file; it must cover every selected week. It is
-  # built from the weekly FT2 files in the same directory.
-  scfile: "/mn/stornext/d23/cmbco/globe/fermi/spacecraft/lat_spacecraft_merged.fits"
+# Weekly spacecraft (FT2) files, matched to the selected photon weeks. The run
+# merges them itself into lat_spacecraft_merged_w<first>-w<last>.fits in
+# merged_dir and reuses that file while its weekly inputs are unchanged. It is
+# used as {scfile} in the steps below (and cached to the RAM disk).
+spacecraft:
+  directory: "/mn/stornext/d23/cmbco/globe/fermi/spacecraft"
+  pattern: "lat_spacecraft_weekly_w*.fits"
+  merged_dir: "/mn/stornext/d23/cmbco/globe/fermi/spacecraft"
+
+# Other common files (cached to RAM in parallel mode for speed). A merged
+# scfile can still be given here instead of the 'spacecraft:' section.
+# common_files:
+#   scfile: "/path/to/lat_spacecraft_merged.fits"
 
 
 ####################

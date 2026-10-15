@@ -12,70 +12,12 @@ import tempfile
 import argparse
 from pathlib import Path
 from datetime import datetime
-import contextlib
 
-def _reexec_under_fermi_python():
-    """Re-exec under the fermitools interpreter if this one lacks omegaconf.
-
-    Bare `python3 runners/parallel_run.py` picks up the system interpreter,
-    which has yaml but not omegaconf, so the config could not be loaded at all.
-    Rather than fail, do the same two-stage bootstrap scripts/run_background.sh
-    does: read 'fermi_base' out of the config with a parser the system python
-    definitely has, then hand off to that env's python.
-
-    Returns only if the hand-off was not possible; the sentinel env var makes
-    looping impossible if the fermi env is itself missing omegaconf.
-    """
-    if os.environ.get("_FERMI_REEXEC"):
-        return
-    config_path = next((a for a in sys.argv[1:] if not a.startswith("-")), None)
-    if not config_path or not os.path.exists(config_path):
-        return
-
-    fermi_base = None
-    try:
-        import yaml
-        with open(config_path) as f:
-            fermi_base = (yaml.safe_load(f) or {}).get("fermi_base")
-    except Exception:
-        # No yaml either - fall back to a regex. fermi_base is required to be a
-        # literal (every config says so next to the key), so this is safe.
-        import re
-        try:
-            with open(config_path) as f:
-                for line in f:
-                    m = re.match(r'^fermi_base:\s*["\']?([^"\'#\s]+)', line)
-                    if m:
-                        fermi_base = m.group(1)
-                        break
-        except Exception:
-            return
-
-    if not fermi_base or "${" in str(fermi_base):
-        return
-
-    candidate = os.path.join(str(fermi_base), "bin", "python3")
-    if (os.path.exists(candidate)
-            and os.path.realpath(candidate) != os.path.realpath(sys.executable)):
-        env = os.environ.copy()
-        env["_FERMI_REEXEC"] = "1"
-        os.execve(candidate, [candidate] + sys.argv, env)
-
-
-try:
-    from omegaconf import OmegaConf
-except ImportError:
-    _reexec_under_fermi_python()
-    sys.exit(
-        "ERROR: omegaconf is not available to this Python interpreter\n"
-        f"       ({sys.executable}).\n"
-        "       The configs use ${...} interpolation and need it.\n"
-        "       Either activate the fermitools env:\n"
-        "           micromamba activate fermi\n"
-        "       or launch via the wrapper, which sets PATH for you:\n"
-        "           ./scripts/run_background.sh <config>\n"
-        "       To install: micromamba install -n fermi -c conda-forge omegaconf"
-    )
+# Run inside the activated fermitools env (micromamba activate fermi), which
+# provides the Fermi tools, CALDB/PFILES, omegaconf, astropy and numpy.
+import numpy as np
+from astropy.io import fits
+from omegaconf import OmegaConf
 
 # Root of the repository (this file lives in <repo>/runners/). Used both by the
 # '${root:...}' config resolver and by the os.chdir() in the entry points, so
@@ -84,38 +26,12 @@ except ImportError:
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-@contextlib.contextmanager
-def worker_pool(n_workers):
-    """A multiprocessing.Pool that closes and joins instead of terminating.
-
-    `with worker_pool(...)` calls terminate() on exit, never
-    close()/join(), so workers are killed mid-task and exceptions in the parent
-    leave the teardown order unspecified. close()+join() waits for workers to
-    finish and reclaims them deterministically; terminate() is kept for the
-    error path only.
-
-    Note: this is a robustness change, NOT a fix for the EMFILE crash seen on
-    owl46. Measured directly, 20 consecutive pools held steady at 42 fds under
-    both patterns - the plain `with` form does not leak. raise_fd_limit() is
-    what addresses EMFILE.
-    """
-    pool = multiprocessing.Pool(n_workers)
-    try:
-        yield pool
-        pool.close()
-    except BaseException:
-        pool.terminate()
-        raise
-    finally:
-        pool.join()
-
-
 def raise_fd_limit(logger):
     """Raise the open-file soft limit to the hard limit.
 
-    The pipeline legitimately wants many concurrent fds (128 workers, each
-    running an Ftool that opens several large FITS files, plus a side pool for
-    streamed merges). Distributions ship a conservative soft limit but a very
+    The pipeline legitimately wants many concurrent fds (hundreds of workers,
+    each running an Ftool that opens several large FITS files, plus the merge
+    pool). Distributions ship a conservative soft limit but a very
     generous hard one, and any process may raise its own soft limit up to the
     hard limit without privileges. A full-mission run died with
     "OSError: [Errno 24] Too many open files" building a merge pool.
@@ -131,22 +47,6 @@ def raise_fd_limit(logger):
     except Exception as e:
         logger.log(f"Could not raise open-file limit: {e}")
 
-
-def open_fd_count():
-    """Number of fds this process currently holds (for leak diagnostics)."""
-    try:
-        return len(os.listdir("/proc/self/fd"))
-    except OSError:
-        return -1
-
-
-# Import astropy only if needed for merging
-try:
-    from astropy.io import fits
-    import numpy as np
-    ASTROPY_AVAILABLE = True
-except ImportError:
-    ASTROPY_AVAILABLE = False
 
 # Spacecraft data kept on each side of a week's TSTART/TSTOP when slicing the
 # merged scfile per week (must bracket every GTI edge; 1h >> one 30s SC row).
@@ -193,19 +93,13 @@ class Logger:
 # documentation for a likelihood stage that does not exist yet - but it is a
 # legitimate part of the config, so it must not be flagged as a typo.
 KNOWN_TOP_LEVEL_KEYS = {
-    'vars', 'fermi_base', 'resources', 'input', 'common_files', 'steps',
-    'merging', 'post_processing', 'science_models', 'run',
+    'vars', 'resources', 'input', 'spacecraft', 'common_files',
+    'steps', 'merging', 'post_processing', 'science_models', 'run',
 }
 
 KNOWN_RESOURCE_KEYS = {
-    'cores', 'ram_disk', 'ltcube_cache', 'stream_merge', 'slice_scfile',
-    'parallel_accum',
+    'cores', 'ram_disk', 'ltcube_cache', 'slice_scfile',
 }
-
-# Keys a config may declare that this runner silently ignores. Keep this list
-# honest: ltcube_cache and stream_merge ARE implemented here, so they must not
-# appear (a sibling pipeline lacks them - do not copy its list over).
-UNIMPLEMENTED_KEYS = []
 
 
 def validate_config(config, logger=None):
@@ -221,16 +115,6 @@ def validate_config(config, logger=None):
             logger.log(f"WARNING: config: {msg}")
         else:
             print(f"WARNING: config: {msg}")
-
-    for path, why in UNIMPLEMENTED_KEYS:
-        node = config
-        for part in path:
-            if not isinstance(node, dict) or part not in node:
-                node = None
-                break
-            node = node[part]
-        if node is not None:
-            warn(f"'{'.'.join(path)}' is declared but not implemented - {why}")
 
     unknown = set(config) - KNOWN_TOP_LEVEL_KEYS - {
         'dry_run', 'skip_merge', 'skip_post', 'selected_steps'}
@@ -509,6 +393,84 @@ class JobScheduler:
             self.logger.log(f"Found {len(files)} input files.")
         return files
 
+    def prepare_spacecraft(self, photon_files):
+        """Merge the weekly spacecraft (FT2) files of the selected weeks.
+
+        With a 'spacecraft:' section in the config, the run takes weekly FT2
+        files exactly like the weekly photon files, and builds the merged file
+        the tools need itself: lat_spacecraft_merged_w009-w947.fits in
+        spacecraft.merged_dir, holding exactly the weeks of the photon files.
+        The merged file records a fingerprint of its inputs (SC_HASH); a later
+        run reuses it only if the fingerprint matches, otherwise rebuilds it.
+        The result becomes common_files.scfile for the rest of the run.
+
+        Without a 'spacecraft:' section, common_files.scfile is used as given.
+        """
+        sc_cfg = self.config.get('spacecraft')
+        if not sc_cfg:
+            return
+        dry_run = self.config.get('dry_run', False)
+
+        # Weekly spacecraft file of every week, by week number
+        sc_by_week = {}
+        for path in Path(sc_cfg['directory']).glob(sc_cfg.get('pattern', 'lat_spacecraft_weekly_w*.fits')):
+            week = week_number(path)
+            if week is None:
+                continue
+            if week in sc_by_week:
+                raise RuntimeError(f"Two spacecraft files for week {week}: {sc_by_week[week]} and {path}")
+            sc_by_week[week] = path
+
+        # The same weeks as the photon files - every one must have its FT2 file
+        week_file_pairs = []
+        missing = []
+        for photon_file in photon_files:
+            week = week_number(photon_file)
+            if week is None:
+                raise RuntimeError(f"Cannot read a week number from {photon_file}; "
+                                   f"weekly spacecraft matching needs weekly photon files")
+            if week not in sc_by_week:
+                missing.append(week)
+                continue
+            week_file_pairs.append((week, sc_by_week[week]))
+        if missing:
+            raise RuntimeError(f"No spacecraft file in {sc_cfg['directory']} for week(s) {missing}")
+
+        # Sort by week so the merged rows are in time order
+        week_file_pairs.sort()
+        weeks_sorted = []
+        files_sorted = []
+        for week, path in week_file_pairs:
+            weeks_sorted.append(week)
+            files_sorted.append(path)
+
+        merged_dir = sc_cfg.get('merged_dir') or self.config['vars']['data_dir']
+        merged_name = f"lat_spacecraft_merged_w{weeks_sorted[0]:03d}-w{weeks_sorted[-1]:03d}.fits"
+        merged_path = os.path.join(merged_dir, merged_name)
+        fingerprint = spacecraft_fingerprint(files_sorted)
+
+        if os.path.exists(merged_path) and read_sc_hash(merged_path) == fingerprint:
+            self.logger.log(f"Spacecraft: reusing {merged_path} ({len(files_sorted)} weekly files, inputs unchanged)")
+        elif dry_run:
+            self.logger.log(f"[DryRun] Would merge {len(files_sorted)} weekly spacecraft files -> {merged_path}")
+        else:
+            if os.path.exists(merged_path):
+                self.logger.log(f"Spacecraft: {merged_path} was built from other inputs - rebuilding")
+            self.logger.log(f"Spacecraft: merging {len(files_sorted)} weekly files -> {merged_path}")
+            t0 = time.time()
+            os.makedirs(merged_dir, exist_ok=True)
+            n_rows, n_dropped = merge_spacecraft_files(files_sorted, merged_path, fingerprint,
+                                                       weeks_sorted[0], weeks_sorted[-1])
+            self.logger.log(f"Spacecraft: {n_rows} rows written, {n_dropped} overlapping rows "
+                            f"dropped at week boundaries, {time.time() - t0:.0f}s")
+
+        if self.config.get('common_files') is None:
+            self.config['common_files'] = {}
+        if self.config['common_files'].get('scfile'):
+            self.logger.log("WARNING: config: common_files.scfile is replaced by the merged "
+                            "spacecraft file (the 'spacecraft:' section wins)")
+        self.config['common_files']['scfile'] = merged_path
+
     def prepare_environment(self, files):
         """Prepare the execution environment for parallel processing.
         
@@ -597,7 +559,7 @@ class JobScheduler:
         if not self.config.get('resources', {}).get('slice_scfile', True):
             return {}
         sc_src = common_file_context.get('scfile')
-        if not sc_src or not ASTROPY_AVAILABLE:
+        if not sc_src:
             return {}
         if self.config.get('dry_run', False):
             self.logger.log(f"[DryRun] Would slice {sc_src} into {len(files)} per-week spacecraft files")
@@ -616,7 +578,7 @@ class JobScheduler:
             # Header-only reads of each week's TSTART/TSTOP (cheap, but parallel
             # anyway - on network storage each open can cost ~100ms)
             n_workers = max(1, min(self.cores, len(files)))
-            with worker_pool(n_workers) as pool:
+            with multiprocessing.Pool(n_workers) as pool:
                 ranges = pool.map(read_time_range, [str(f) for f in files])
 
             slice_tasks = []
@@ -636,7 +598,7 @@ class JobScheduler:
                 return {}
 
             n_workers = max(1, min(self.cores, len(slice_tasks)))
-            with worker_pool(n_workers) as pool:
+            with multiprocessing.Pool(n_workers) as pool:
                 outcomes = pool.map(slice_sc_worker, slice_tasks)
 
             overrides = {}
@@ -661,6 +623,7 @@ class JobScheduler:
         phase_times = {}
         t_phase = time.time()
         files = self.discover_files()
+        self.prepare_spacecraft(files)
         working_files, common_context, sc_overrides = self.prepare_environment(files)
         phase_times['prepare (common files + sc slices)'] = time.time() - t_phase
 
@@ -728,45 +691,31 @@ class JobScheduler:
         # until the merge phase and overflow /dev/shm for big grids like CCUBE 0.1deg).
         self._img_accum = {}
         image_sum_keys = set()
-        if ASTROPY_AVAILABLE and not self.config.get('dry_run', False):
+        if not self.config.get('dry_run', False):
             for m in self.config.get('merging', []):
                 if m.get('strategy') == 'image_sum':
                     image_sum_keys.add(m['input_pattern'].strip("{}"))
 
         # Accumulator processes: summing a chunk into the running image_sum total
-        # costs seconds for big cubes, and doing it inline here serializes it in
-        # the main process - with many cores that becomes the throughput ceiling.
+        # costs seconds for big cubes, and doing it in the main process would
+        # serialize it - with many cores that becomes the throughput ceiling.
         # A few dedicated processes drain a queue of finished chunk paths instead
         # (chunks arrive slower than accumulators consume, so files don't pile up
-        # on the RAM disk). Set resources.parallel_accum: false for the old
-        # inline path.
+        # on the RAM disk).
         accum_queue = None
         accum_procs = []
-        parallel_accum = self.config.get('resources', {}).get('parallel_accum', True)
-        if image_sum_keys and parallel_accum:
+        if image_sum_keys:
             n_acc = max(1, min(8, self.cores))
             accum_queue = multiprocessing.Queue()
             for wid in range(n_acc):
+                # daemon: if the run aborts, they must not keep the process alive
+                # waiting on the queue
                 p = multiprocessing.Process(target=accumulate_image_sum_worker,
-                                            args=(accum_queue, self.working_dir, wid))
+                                            args=(accum_queue, self.working_dir, wid),
+                                            daemon=True)
                 p.start()
                 accum_procs.append(p)
             self.logger.log(f"Started {n_acc} image_sum accumulator processes.")
-
-        # Stream stage-1 hierarchical (gtltsum) merges while processing runs:
-        # finished chunk ltcubes are merged in batches of 8 by a small side
-        # pool, so most of the merge phase hides behind the processing phase
-        # instead of running after it. resources.stream_merge: false disables.
-        stream_state = {}
-        merge_pool = None
-        if (not self.config.get('dry_run', False)
-                and not self.config.get('skip_merge', False)
-                and self.config.get('resources', {}).get('stream_merge', True)):
-            for m in self.config.get('merging', []):
-                if m.get('strategy') == 'hierarchical':
-                    stream_state[m['input_pattern'].strip("{}")] = {
-                        'paths': {}, 'done': {}, 'jobs': [],
-                        'tool': m.get('tool', 'gtltsum')}
 
         self.logger.log(f"Starting parallel execution on {self.cores} cores...")
         t_phase = time.time()
@@ -776,115 +725,40 @@ class JobScheduler:
         contributors = {}     # output key -> set of chunk ids that produced it
         skipped_weeks = []    # weeks the tools reported as empty
 
-        try:
-            with worker_pool(self.cores) as pool:
-                # Use imap_unordered to track progress as tasks finish
-                for result in pool.imap_unordered(execute_worker, tasks):
+        with multiprocessing.Pool(self.cores) as pool:
+            # Use imap_unordered to track progress as tasks finish
+            for result in pool.imap_unordered(execute_worker, tasks):
+                if result.get('success'):
                     # Record which chunks produced which outputs BEFORE the
                     # image_sum outputs are handed off and cleared below; the
                     # merge phase checks that every merged product (counts,
                     # livetime) is built from the same set of weeks.
-                    if result.get('success'):
-                        for key, paths in result.get('outputs', {}).items():
-                            if paths:
-                                contributors.setdefault(key, set()).add(result['id'])
-                        for name in result.get('skipped', []):
-                            skipped_weeks.append(name)
+                    outputs = result.get('outputs', {})
+                    for key, paths in outputs.items():
+                        if paths:
+                            contributors.setdefault(key, set()).add(result['id'])
+                    for name in result.get('skipped', []):
+                        skipped_weeks.append(name)
 
-                    # Hand image_sum chunk outputs to the accumulators (or fold them
-                    # in inline as fallback) so they are summed and freed immediately.
-                    if result.get('success') and image_sum_keys:
-                        for key in image_sum_keys:
-                            for fp in result.get('outputs', {}).get(key, []):
-                                if accum_queue is not None:
-                                    accum_queue.put((key, fp))
-                                else:
-                                    try:
-                                        self._accumulate_image_sum(key, fp)
-                                    except Exception as e:
-                                        self.logger.error(f"Incremental image_sum failed for {fp}: {e}")
-                            # Mark consumed so the merge phase won't look for deleted files
-                            if key in result.get('outputs', {}):
-                                result['outputs'][key] = []
+                    # Hand image_sum chunk outputs to the accumulators, which
+                    # sum and delete them, and mark them consumed so the merge
+                    # phase does not look for the deleted files.
+                    for key in image_sum_keys:
+                        for fp in outputs.get(key, []):
+                            accum_queue.put((key, fp))
+                        if key in outputs:
+                            outputs[key] = []
 
-                    # Feed finished hierarchical-merge inputs to the side pool.
-                    # Batches are FIXED by task id (batch b = ids [8b, 8b+8)) and
-                    # submitted once all of a batch's tasks completed - completion
-                    # order then affects only WHEN a batch merges, never its
-                    # composition or summation order, keeping outputs reproducible
-                    # (livetime cubes hold float32 - reordered adds would drift).
-                    if stream_state:
-                        rid = result['id']
-                        b = rid // 8
-                        n_in_batch = min(8, total_tasks - b * 8)
-                        for key, st in stream_state.items():
-                            if result.get('success'):
-                                for p in result.get('outputs', {}).get(key, []):
-                                    st['paths'].setdefault(b, []).append((rid, p))
-                            st['done'][b] = st['done'].get(b, 0) + 1
-                            if st['done'][b] == n_in_batch:
-                                # Empty weeks contribute no file; submit what exists
-                                batch = [p for _, p in sorted(st['paths'].pop(b, []))]
-                                if not batch:
-                                    continue
-                                if merge_pool is None:
-                                    n_merge = max(2, min(16, self.cores // 8))
-                                    merge_pool = multiprocessing.Pool(n_merge)
-                                    self.logger.log(f"Streaming hierarchical merges on {n_merge} side workers.")
-                                out = os.path.join(self.working_dir, f"stream_{key}_batch{b}.fits")
-                                st['jobs'].append((b, batch, merge_pool.apply_async(
-                                    merge_batch_worker, ((batch, out, st['tool']),))))
-
-                    results.append(result)
-                    completed += 1
-                    percent = (completed / total_tasks) * 100
-                    self.logger.log(f"Progress: {completed}/{total_tasks} files ({percent:.1f}%)")
-
-        finally:
-            # The streamed-merge side pool is created lazily inside the loop
-            # above; without this it is leaked if the main pool raises.
-            if merge_pool is not None and not getattr(merge_pool, '_state_closed', False):
-                try:
-                    merge_pool.close()
-                except Exception:
-                    merge_pool.terminate()
+                results.append(result)
+                completed += 1
+                percent = (completed / total_tasks) * 100
+                self.logger.log(f"Progress: {completed}/{total_tasks} files ({percent:.1f}%)")
         phase_times['parallel processing'] = time.time() - t_phase
 
         if accum_procs:
             t_phase = time.time()
             self._drain_accumulators(accum_queue, accum_procs, image_sum_keys)
             phase_times['accumulator drain'] = time.time() - t_phase
-
-        # Collect streamed stage-1 merge results. Failed batches fold their
-        # chunk files back in so the final merge phase retries them normally.
-        self._streamed = {}
-        if stream_state:
-            t_phase = time.time()
-            if merge_pool is not None:
-                merge_pool.close()
-                merge_pool.join()
-            for key, st in stream_state.items():
-                batch_outs, retry = [], []
-                # Batch-index order keeps the stage-2 input order deterministic
-                for b, batch, job in sorted(st['jobs'], key=lambda x: x[0]):
-                    out_path, err = job.get()
-                    if err:
-                        # Not an error yet: the chunks are retried in the merge
-                        # phase, which aborts the run if they fail again.
-                        self.logger.log(f"WARNING: streamed merge batch failed - retrying its chunks in the merge phase: {err}")
-                        retry.extend(batch)
-                    else:
-                        batch_outs.append(out_path)
-                        for f in batch:  # summed into out_path; free the RAM disk now
-                            try:
-                                os.remove(f)
-                            except OSError:
-                                pass
-                if st['jobs']:
-                    self._streamed[key] = batch_outs + retry
-                    self.logger.log(f"Streamed {len(batch_outs)}/{len(st['jobs'])} stage-1 "
-                                    f"batches for {key} during processing.")
-            phase_times['streamed merge wait'] = time.time() - t_phase
 
         results.sort(key=lambda x: x['id'])
 
@@ -1029,37 +903,6 @@ class JobScheduler:
         self.logger.log("-" * 56)
         self.logger.log("(Note: Total Time is sum across all cores. Divide by core count for wall time estimate.)")
 
-    def _accumulate_image_sum(self, key, filepath):
-        """Add one chunk map into the running image_sum total, then delete the file.
-
-        Keeps a copy of the first chunk's HDU structure as a template so the final
-        merged file has the right header/format. Accumulates in float64. Handles
-        both image maps (primary HDU) and HEALPix maps (binary table).
-        """
-        if not filepath or not os.path.exists(filepath):
-            return
-        with fits.open(filepath, memmap=False) as hdul:
-            map_ext, data = find_map_data(hdul)
-            gti = extract_gti_rows(hdul)
-            acc = self._img_accum.get(key)
-            if acc is None:
-                template = fits.HDUList([h.copy() for h in hdul])
-                self._img_accum[key] = {
-                    'template': template,
-                    'map_ext': map_ext,
-                    'data': np.asarray(data, dtype=np.float64).copy(),
-                    'count': 1,
-                    # The template's GTI describes only THIS chunk; union every
-                    # chunk's intervals or the merged map claims one week of
-                    # observing time for many weeks of photons.
-                    'gti': gti,
-                }
-            else:
-                np.add(acc['data'], data, out=acc['data'])
-                acc['count'] += 1
-                acc['gti'] = merge_gti_rows(acc.get('gti', []), gti)
-        os.remove(filepath)
-
     def _drain_accumulators(self, accum_queue, accum_procs, image_sum_keys):
         """Stop the accumulator processes and combine their partial sums.
 
@@ -1130,8 +973,11 @@ class JobScheduler:
         """Dispatch merge operations based on the 'merging' config.
         
         Collects all output files from worker results, groups them by type
-        (e.g. chunk_ccube, chunk_ltcube), and merges each group using
-        the strategy specified in the YAML config (ftmerge, image_sum, or hierarchical).
+        (e.g. chunk_hpxcube, chunk_ltcube), and merges each group using the
+        strategy specified in the YAML config:
+          image_sum     maps summed by the accumulator processes during the run
+                        (counts); only the total is written here
+          hierarchical  pairwise tree merge with a Fermi tool (livetime cubes, gtltsum)
         """
         self.logger.log("Starting merging phase...")
         merging_config = self.config.get('merging', [])
@@ -1156,23 +1002,25 @@ class JobScheduler:
             if out_dir and not self.config.get('dry_run', False):
                 os.makedirs(out_dir, exist_ok=True)
 
-            # image_sum chunks were accumulated incrementally during processing
-            # (files already summed and deleted) - just write the running total.
-            if strategy == 'image_sum' and pattern_key in getattr(self, '_img_accum', {}):
-                if self.config.get('dry_run', False):
-                    self.logger.log(f"[DryRun] Would write accumulated {pattern_key} to {output_file}")
-                else:
+            if strategy not in ('image_sum', 'hierarchical'):
+                self.logger.error(f"Unknown merge strategy '{strategy}' in merge step {merge_step['name']} "
+                                  f"(use image_sum or hierarchical)")
+                raise RuntimeError(f"Unknown merge strategy: {strategy}")
+
+            # image_sum chunks were accumulated during processing (files already
+            # summed and deleted) - just write the running total.
+            if strategy == 'image_sum' and not self.config.get('dry_run', False):
+                if pattern_key in self._img_accum:
                     self.write_accumulated_image_sum(pattern_key, output_file)
+                elif self.config.get('selected_steps'):
+                    self.logger.log(f"Skipping merge step {merge_step['name']}: nothing accumulated "
+                                    f"(expected during partial run).")
+                else:
+                    self.logger.error(f"Nothing was accumulated for merge step {merge_step['name']} "
+                                      f"(looking for {pattern_key})")
                 continue
 
             input_files = files_by_type.get(pattern_key, [])
-
-            # Hierarchical inputs may already be partially merged by the
-            # streaming side pool - continue from its stage-1 outputs (the
-            # original chunk paths in files_by_type were consumed/deleted).
-            streamed = getattr(self, '_streamed', {}).get(pattern_key)
-            if strategy == 'hierarchical' and streamed is not None:
-                input_files = streamed
 
             if not input_files:
                 # If we are running partial steps, this is expected
@@ -1188,87 +1036,8 @@ class JobScheduler:
                  self.logger.log(f"[DryRun] Would merge {len(input_files)} files to {output_file} using {strategy}")
                  continue
 
-            if strategy == 'image_sum':
-                self.merge_image_sum(input_files, output_file)
-            elif strategy == 'ftmerge':
-                self.merge_ftmerge(input_files, output_file)
-            elif strategy == 'hierarchical':
-                self.merge_hierarchical(input_files, output_file, tool=merge_step.get('tool', 'ftmerge'))
-            else:
-                self.logger.error(f"Unknown merge strategy: {strategy}")
-
-    def merge_ftmerge(self, files, output_file):
-        """Merge FITS event tables using HEASoft's ftmerge.
-        
-        Writes input paths to a list file and calls ftmerge with @listfile syntax.
-        Best for event-type data (photon lists, GTI tables) where rows are appended.
-        """
-        if not files: return
-        
-        list_file = output_file + ".list"
-        with open(list_file, 'w') as f:
-            for path in files:
-                f.write(path + "\n")
-        
-        try:
-            cmd = f"ftmerge @{list_file} {output_file} clobber=yes"
-            subprocess.run(cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            self.logger.log(f"Created merged file (ftmerge): {output_file}")
-            os.remove(list_file)
-        except Exception as e:
-            self.logger.error(f"ftmerge failed: {e}")
-            raise
-
-    def merge_image_sum(self, files, output_file):
-        """Merge FITS images by pixel-wise summation using astropy.
-        
-        Opens each file and adds pixel values to a running sum.
-        Used for count maps (ccube) where the total counts = sum of individual maps.
-        Requires astropy.
-        """
-        if not ASTROPY_AVAILABLE:
-            self.logger.error("Astropy not installed, cannot perform image_sum")
-            return
-
-        if not files:
-            return
-
-        try:
-            with fits.open(files[0]) as hdul:
-                result_hdul = fits.HDUList([hdu.copy() for hdu in hdul])
-                map_ext, _ = find_map_data(hdul)
-
-            # Parallel partial sums: each worker reads+sums a slice of the files
-            # (the file reads are the expensive part), then the few partial
-            # arrays are added together here.
-            n_workers = min(self.cores, len(files))
-            if n_workers > 1:
-                slices = [files[i::n_workers] for i in range(n_workers)]
-                with worker_pool(n_workers) as pool:
-                    partials = pool.map(partial_sum_worker, slices)
-            else:
-                partials = [partial_sum_worker(files)]
-
-            base_data = partials[0]
-            for p in partials[1:]:
-                base_data += p
-
-            write_map_data(result_hdul, map_ext, base_data)
-            # Union the GTIs of every input, not just files[0] -- see merge_gti_rows.
-            all_gti = []
-            for f in files:
-                with fits.open(f) as hdul:
-                    all_gti = merge_gti_rows(all_gti, extract_gti_rows(hdul))
-            live = write_merged_gti(result_hdul, all_gti)
-            if live is not None:
-                self.logger.log(f"  merged GTI: {len(all_gti)} intervals, "
-                                f"{live / 86400.0:.2f} days livetime from {len(files)} files")
-            result_hdul.writeto(output_file, overwrite=True)
-            self.logger.log(f"Created merged file: {output_file}")
-
-        except Exception as e:
-            self.logger.error(f"Image sum failed: {e}")
-            raise
+            # Only 'hierarchical' gets here: image_sum was written above
+            self.merge_hierarchical(input_files, output_file, tool=merge_step.get('tool', 'gtltsum'))
 
     def merge_hierarchical(self, files, output_file, tool='gtltsum'):
         """Merge files in a tree-reduction pattern using a pairwise tool.
@@ -1310,10 +1079,10 @@ class JobScheduler:
                 batch_tasks.append((batch, batch_out, tool))
 
             n_workers = min(self.cores, len(batches))
-            self.logger.log(f"Merge stage {stage}: {len(current_files)} files -> {len(batches)} batches ({n_workers} in parallel, {open_fd_count()} fds open)")
+            self.logger.log(f"Merge stage {stage}: {len(current_files)} files -> {len(batches)} batches ({n_workers} in parallel)")
 
             if n_workers > 1:
-                with worker_pool(n_workers) as pool:
+                with multiprocessing.Pool(n_workers) as pool:
                     outcomes = pool.map(merge_batch_worker, batch_tasks)
             else:
                 outcomes = [merge_batch_worker(t) for t in batch_tasks]
@@ -1655,6 +1424,101 @@ def accumulate_image_sum_worker(queue, out_dir, worker_id):
                               overwrite=True)
 
 
+SC_HASH_KEY = "SC_HASH"
+
+
+def spacecraft_fingerprint(paths):
+    """Hash of the weekly FT2 inputs (name, size, mtime of each, in order).
+
+    Stored in the merged file's header: a merged file is reused only when it
+    was built from exactly these files, e.g. not after a weekly file was
+    re-downloaded (the current week is reprocessed daily by the FSSC).
+    """
+    digest = hashlib.sha256()
+    for path in paths:
+        stat = os.stat(path)
+        digest.update(f"{os.path.basename(path)}:{stat.st_size}:{int(stat.st_mtime)}\n".encode())
+    return digest.hexdigest()[:32]
+
+
+def read_sc_hash(path):
+    """SC_HASH keyword of a merged spacecraft file, or None."""
+    try:
+        with fits.open(path) as hdul:
+            return hdul[0].header.get(SC_HASH_KEY)
+    except Exception:
+        return None
+
+
+def merge_spacecraft_files(paths, out_path, fingerprint, week_lo, week_hi):
+    """Concatenate weekly FT2 files (in time order) into one merged FT2 file.
+
+    Rows are taken in file order. A row that starts before the previous kept
+    row stops (the same 30 s interval written in two adjacent weekly files)
+    is dropped, so the merged table is strictly time ordered and never counts
+    an interval twice - double rows would double that interval's livetime.
+
+    Written to a temporary file and renamed, so a crash never leaves a
+    half-written merged file that a later run could pick up.
+    Returns (rows written, overlapping rows dropped).
+    """
+    pieces = []
+    n_dropped = 0
+    last_stop = None
+    columns = None
+    primary_header = None
+    sc_header = None
+
+    for path in paths:
+        with fits.open(path, memmap=False) as hdul:
+            sc_hdu = hdul['SC_DATA']
+            if columns is None:
+                columns = sc_hdu.columns
+                primary_header = hdul[0].header.copy()
+                sc_header = sc_hdu.header.copy()
+            data = np.array(sc_hdu.data)
+
+        start = data['START']
+        if len(start) > 1 and np.any(np.diff(start) < 0):
+            raise RuntimeError(f"{path}: SC_DATA rows are not in time order")
+
+        if last_stop is None:
+            keep = np.ones(len(start), dtype=bool)
+        else:
+            keep = start >= last_stop - 1e-3
+        n_dropped += int(len(start) - keep.sum())
+        data = data[keep]
+        if len(data) == 0:
+            continue
+        pieces.append(data)
+        last_stop = float(data['STOP'][-1])
+
+    if not pieces:
+        raise RuntimeError("No spacecraft rows to merge")
+    merged = np.concatenate(pieces)
+
+    # Keep the original column definitions (formats, units) and fill them
+    sc_out = fits.BinTableHDU.from_columns(columns, header=sc_header, nrows=len(merged), name='SC_DATA')
+    for name in merged.dtype.names:
+        sc_out.data[name] = merged[name]
+
+    tstart = float(merged['START'][0])
+    tstop = float(merged['STOP'][-1])
+    primary = fits.PrimaryHDU(header=primary_header)
+    for header in (primary.header, sc_out.header):
+        header['TSTART'] = tstart
+        header['TSTOP'] = tstop
+    primary.header[SC_HASH_KEY] = (fingerprint, 'hash of the weekly FT2 inputs')
+    primary.header['WEEKMIN'] = (week_lo, 'first mission week merged')
+    primary.header['WEEKMAX'] = (week_hi, 'last mission week merged')
+    primary.header['NWEEKS'] = (len(paths), 'number of weekly FT2 files merged')
+
+    tmp_path = f"{out_path}.tmp{os.getpid()}"
+    fits.HDUList([primary, sc_out]).writeto(tmp_path, overwrite=True)
+    os.replace(tmp_path, out_path)
+    return len(merged), n_dropped
+
+
 def read_time_range(fits_path):
     """TSTART/TSTOP of a FITS file from the first header that carries them."""
     with fits.open(fits_path) as hdul:
@@ -1780,22 +1644,6 @@ def write_map_data(result_hdul, ext_index, data):
             table[name] = data[:, j]
 
 
-def partial_sum_worker(file_slice):
-    """Read a slice of FITS map files and return their pixel-wise sum.
-
-    Handles both image maps (primary HDU) and HEALPix maps (binary table).
-    Accumulates in float64 to avoid overflow/precision issues.
-    """
-    total = None
-    for f in file_slice:
-        with fits.open(f) as hdul:
-            _, data = find_map_data(hdul)
-            if total is None:
-                total = data.astype(np.float64)
-            else:
-                total += data
-    return total
-
 
 def make_worker_env():
     """Build a subprocess environment with a private PFILES directory.
@@ -1877,51 +1725,6 @@ def seed_system_pfiles(logger):
         logger.log(f"Could not mirror system pfiles locally ({e}) - keeping {sys_part}")
 
 
-def preflight_par_check(config, logger):
-    """Verify every pipeline tool can find its .par file with the exact PFILES
-    the workers will use - BEFORE any copying/slicing/scheduling happens.
-
-    A wrong PFILES system part makes every chunk fail with ape's 'Cannot open
-    parameter file' (eFileNotFound) after minutes of setup; this catches it in
-    milliseconds with a precise diagnosis instead. Returns True if all good.
-    """
-    tools = []
-    for step in config.get('steps', []):
-        cmd = step.get('command', '').strip()
-        if cmd:
-            tools.append(cmd.split()[0])
-    for m in config.get('merging', []):
-        if m.get('strategy') == 'hierarchical':
-            tools.append(m.get('tool', 'gtltsum'))
-        elif m.get('strategy') == 'ftmerge':
-            tools.append('ftmerge')
-    # De-dup, and skip non-Ftools commands (scripts have no .par files)
-    tools = [t for t in dict.fromkeys(tools)
-             if t not in ('python3', 'python', 'bash', 'sh')]
-
-    env = make_worker_env()
-    pfiles = env.get('PFILES', '')
-    local_part, _, sys_part = pfiles.partition(';')
-    search_dirs = [d for d in (local_part.split(':') + sys_part.split(':')) if d]
-
-    missing = [t for t in tools
-               if not any(os.path.exists(os.path.join(d, t + '.par')) for d in search_dirs)]
-
-    logger.log(f"Worker PFILES: {pfiles}")
-    if not missing:
-        logger.log(f"Preflight: parameter files found for all tools ({', '.join(tools)}).")
-        return True
-
-    logger.error(f"Preflight: no .par file found for: {', '.join(missing)}")
-    for d in search_dirs:
-        state = 'MISSING DIR' if not os.path.isdir(d) else \
-            f"{len(glob.glob(os.path.join(d, '*.par')))} .par files"
-        logger.error(f"  PFILES dir {d}: {state}")
-    logger.error("The PFILES system part does not reach the fermitools syspfiles. "
-                 "Check 'fermi_base' in the config and the PFILES environment variable.")
-    return False
-
-
 # Marker for transient parameter-file failures under heavy startup bursts;
 # these are worth retrying before failing the whole chunk.
 APE_TRANSIENT_MARKER = "Cannot open parameter file"
@@ -1977,104 +1780,19 @@ def merge_batch_worker(args):
         return (None, f"{tool} batch merge exception: {e}")
 
 
-def setup_fermi_environment(logger, fermi_base=None):
-    """Set up the Ftools environment (CALDB, FERMI_DIR, PFILES, PATH).
+def check_fermi_environment(logger):
+    """Stop early with a clear message if the fermitools env is not active.
 
-    fermi_base: root of the fermitools conda/micromamba env. Comes from the
-    'fermi_base' key in the YAML config. If not set there, it is derived from
-    the location of 'gtselect' on PATH (i.e. an already-activated fermi env).
-
-    Env vars that are already set but point to nonexistent paths are treated
-    as stale (e.g. exported by an old shell script for a different machine)
-    and are overridden - this prevents every gtool from aborting with
-    'File not found' when the hardcoded paths of another node leak in.
+    Otherwise every week would fail separately with a less obvious error.
     """
     gtselect_path = shutil.which("gtselect")
+    if gtselect_path is None:
+        logger.error("'gtselect' is not on PATH - activate the fermitools env first "
+                     "(micromamba activate fermi)")
+        return False
+    logger.log(f"Fermi tools: {os.path.dirname(gtselect_path)}")
+    return True
 
-    if not fermi_base and gtselect_path:
-        # .../envs/fermi/bin/gtselect -> .../envs/fermi
-        fermi_base = os.path.dirname(os.path.dirname(gtselect_path))
-        logger.log(f"fermi_base not set in config; derived from gtselect location: {fermi_base}")
-    elif fermi_base:
-        fermi_base = os.path.expanduser(fermi_base)
-        logger.log(f"Using fermi_base from config: {fermi_base}")
-
-    if not fermi_base:
-        logger.error("CRITICAL: fermi_base is not set in the config and 'gtselect' is not on PATH.")
-        logger.error("Add to your YAML config:  fermi_base: \"/path/to/your/micromamba/envs/fermi\"")
-        return
-
-    if not os.path.exists(fermi_base):
-        logger.error(f"CRITICAL: fermi_base does not exist: {fermi_base} - check the 'fermi_base' key in your config.")
-        return
-
-    env_updates = {
-        "CALDB": f"{fermi_base}/share/fermitools/data/caldb",
-        "CALDBCONFIG": f"{fermi_base}/share/fermitools/data/caldb/software/tools/caldb.config",
-        "CALDBALIAS": f"{fermi_base}/share/fermitools/data/caldb/software/tools/alias_config.fits",
-        "CALDBROOT": f"{fermi_base}/share/fermitools/data/caldb",
-        "FERMI_DIR": f"{fermi_base}/share/fermitools",
-        "FERMI_INST_DIR": f"{fermi_base}/share/fermitools",
-        "HEADAS": f"{fermi_base}/heasoft" 
-    }
-
-    # Add fermi bins to PATH if missing
-    if not gtselect_path or not shutil.which("farith"):
-         extra_paths = [
-             f"{fermi_base}/bin",
-             f"{fermi_base}/heasoft/bin"
-         ]
-         for p in extra_paths:
-             if os.path.exists(p) and p not in os.environ["PATH"]:
-                 logger.log(f"Auto-adding {p} to PATH")
-                 os.environ["PATH"] = p + os.pathsep + os.environ["PATH"]
-         
-         # Re-check
-         gtselect_path = shutil.which("gtselect")
-
-    # Set missing env vars, and CORRECT stale ones that point to nonexistent
-    # paths (e.g. exported by a shell script hardcoded for a different machine)
-    for key, val in env_updates.items():
-        current = os.environ.get(key)
-        if current is None:
-            if os.path.exists(val) or key in ("CALDBCONFIG", "CALDBALIAS"):
-                logger.log(f"Auto-setting {key}={val}")
-                os.environ[key] = val
-        elif not os.path.exists(current) and os.path.exists(val):
-            logger.log(f"Overriding stale {key} (was {current}, path does not exist) -> {val}")
-            os.environ[key] = val
-
-    # Setup PFILES. Rebuild if missing, stale, or SHADOWED: a cluster-wide
-    # HEASoft install can provide a PFILES system part whose dirs exist but
-    # contain no gt*.par - then every gtool fails with ape's 'Cannot open
-    # parameter file' (eFileNotFound). Existing dirs alone prove nothing;
-    # gtselect.par is the sentinel that the fermitools pars are reachable.
-    # (Interactive shells hide this: ~/pfiles holds learned copies of the
-    # pars, but workers get a fresh private local dir and lose ~/pfiles.)
-    pfiles_current = os.environ.get("PFILES", "")
-    sys_part = pfiles_current.split(";", 1)[1] if ";" in pfiles_current else ""
-    sys_dirs = [p for p in sys_part.split(":") if p]
-    sys_dirs_exist = any(os.path.exists(p) for p in sys_dirs)
-    has_gtool_pars = any(os.path.exists(os.path.join(p, "gtselect.par")) for p in sys_dirs)
-    if not pfiles_current or not sys_dirs_exist or not has_gtool_pars:
-        pfiles_local = os.path.expanduser("~/pfiles")
-        os.makedirs(pfiles_local, exist_ok=True)
-        sys_pfiles = f"{fermi_base}/heasoft/syspfiles:{fermi_base}/share/fermitools/syspfiles"
-        # Keep any existing dirs (e.g. cluster HEASoft), searched AFTER the
-        # fermitools ones so they cannot shadow the gtool pars.
-        keep = ":".join(p for p in sys_dirs if os.path.exists(p))
-        if keep:
-            sys_pfiles = f"{sys_pfiles}:{keep}"
-        if pfiles_current:
-            logger.log(f"PFILES system part unusable for fermitools (was {pfiles_current}) - rebuilding")
-        os.environ["PFILES"] = f"{pfiles_local}:.;{sys_pfiles}"
-        logger.log(f"Auto-configured PFILES={os.environ['PFILES']}")
-
-
-    logger.log(f"Environment Check: gtselect found at: {gtselect_path}")
-    if not gtselect_path:
-        logger.error("CRITICAL: 'gtselect' not found in PATH. Ftools environment likely not active.")
-        logger.error(f"Current PATH: {os.environ.get('PATH')}")
 
 def main():
     # Anchor the process at the repository root: post_processing commands are
@@ -2094,11 +1812,10 @@ def main():
     scheduler = None
     try:
         config = ConfigLoader.load(args.config, logger)
-        setup_fermi_environment(logger, config.get('fermi_base'))
+        if not check_fermi_environment(logger):
+            sys.exit(1)
         raise_fd_limit(logger)
         seed_system_pfiles(logger)
-        if not preflight_par_check(config, logger):
-            sys.exit(1)
 
         # Run options come from the optional 'run:' section of the YAML config.
         # The only CLI flag is --dry-run (preview mode).
@@ -2140,12 +1857,9 @@ if __name__ == "__main__":
     main()
 
 
-
 # NOTE on the gtltsum hierarchical merge:
-# The batches within each merge stage now run in parallel across cores (see merge_hierarchical /
-# merge_batch_worker), which removes most of the old ~7min serial bottleneck. The remaining
-# sequential part is the pairwise merging *within* a batch (gtltsum can only combine two files
-# at a time) and the final stages where few batches remain.
-# DONE: the merge is now streamed during the main processing phase - finished chunk ltcubes are
-# merged in batches of 8 by a side pool while processing continues (resources.stream_merge,
-# default true). See JobScheduler.run(); batches are fixed by task id so output stays reproducible.
+# The batches within each merge stage run in parallel across cores (see merge_hierarchical /
+# merge_batch_worker). The remaining sequential part is the pairwise merging *within* a batch
+# (gtltsum can only combine two files at a time) and the final stages where few batches remain.
+# Inputs are in chunk-id order, so batch composition and summation order (float32 livetime
+# cubes) are reproducible.

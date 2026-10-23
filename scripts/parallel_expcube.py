@@ -24,14 +24,15 @@ Notes:
   - Requires LOG energy binning (gtexpcube2's emin/emax/enumbins with
     ebinfile=NONE).
 """
-import os
-import sys
-import time
+
 import argparse
-import subprocess
-import tempfile
-import shutil
 import multiprocessing
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
 
 import numpy as np
 from astropy.io import fits
@@ -39,19 +40,31 @@ from astropy.io import fits
 # make_worker_env lives with the pipeline runner (private PFILES per worker,
 # without which parallel gtool startups contend on .par file locks).
 # Run inside the activated fermitools env (micromamba activate fermi).
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "runners"))
-from parallel_run import (make_worker_env, check_fermi_environment,  # noqa: E402
-                          seed_system_pfiles, Logger, APE_TRANSIENT_MARKER)
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "runners")
+)
+from parallel_run import (  # noqa: E402
+    APE_TRANSIENT_MARKER,
+    Logger,
+    check_fermi_environment,
+    make_worker_env,
+    seed_system_pfiles,
+)
 
 
 def run_one_bin(args):
     """Run gtexpcube2 for a single energy bin. Returns (idx, None) or (idx, error)."""
     idx, params, out_path = args
-    cmd = ["gtexpcube2"] + [f"{k}={v}" for k, v in params.items()] + [f"outfile={out_path}"]
+    cmd = (
+        ["gtexpcube2"]
+        + [f"{k}={v}" for k, v in params.items()]
+        + [f"outfile={out_path}"]
+    )
     env = make_worker_env()
     for attempt in (1, 2, 3):
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              text=True, env=env)
+        proc = subprocess.run(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env
+        )
         if proc.returncode == 0:
             return (idx, None)
         if APE_TRANSIENT_MARKER not in (proc.stderr or "") or attempt == 3:
@@ -65,7 +78,9 @@ def stack_planes(plane_files, outfile):
     energies = []
     for f in plane_files:
         with fits.open(f) as hdul:
-            energies.extend(np.asarray(hdul["ENERGIES"].data["Energy"], dtype=np.float64))
+            energies.extend(
+                np.asarray(hdul["ENERGIES"].data["Energy"], dtype=np.float64)
+            )
 
     with fits.open(plane_files[0]) as tpl:
         is_image = tpl[0].data is not None
@@ -85,30 +100,44 @@ def stack_planes(plane_files, outfile):
                 with fits.open(f) as hdul:
                     tab = hdul[1]
                     src = tab.columns[0]
-                    cols.append(fits.Column(name=f"ENERGY{i+1}", format=src.format,
-                                            array=np.asarray(tab.data[src.name])))
-            table = fits.BinTableHDU.from_columns(cols, header=tpl[1].header.copy(),
-                                                  name=tpl[1].name)
+                    cols.append(
+                        fits.Column(
+                            name=f"ENERGY{i + 1}",
+                            format=src.format,
+                            array=np.asarray(tab.data[src.name]),
+                        )
+                    )
+            table = fits.BinTableHDU.from_columns(
+                cols, header=tpl[1].header.copy(), name=tpl[1].name
+            )
             primary = fits.PrimaryHDU(header=tpl[0].header.copy())
             extras = [table] + [h.copy() for h in tpl[2:] if h.name != "ENERGIES"]
 
         with fits.open(plane_files[0]) as ref:
             energies_hdu = fits.BinTableHDU.from_columns(
                 [fits.Column(name="Energy", format="1D", array=np.array(energies))],
-                header=ref["ENERGIES"].header.copy(), name="ENERGIES")
+                header=ref["ENERGIES"].header.copy(),
+                name="ENERGIES",
+            )
 
         # ENERGIES sits right after the map data, GTI (and anything else) after it
         gti_like = [h for h in extras if h.name == "GTI"]
         others = [h for h in extras if h.name != "GTI"]
         fits.HDUList([primary] + others + [energies_hdu] + gti_like).writeto(
-            outfile, overwrite=True)
+            outfile, overwrite=True
+        )
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--cores", type=int, default=0,
-                    help="parallel gtexpcube2 processes (default: min(nbins, cpu_count))")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--cores",
+        type=int,
+        default=0,
+        help="parallel gtexpcube2 processes (default: min(nbins, cpu_count))",
+    )
     ap.add_argument("params", nargs="+", help="gtexpcube2 key=value parameters")
     args = ap.parse_args()
 
@@ -146,7 +175,7 @@ def main():
         for i in range(nbins):
             bin_params = dict(params)
             bin_params["emin"] = f"{edges[i]:.15g}"
-            bin_params["emax"] = f"{edges[i+1]:.15g}"
+            bin_params["emax"] = f"{edges[i + 1]:.15g}"
             bin_params["enumbins"] = "1"
             tasks.append((i, bin_params, os.path.join(tmp_dir, f"plane_{i:03d}.fits")))
 

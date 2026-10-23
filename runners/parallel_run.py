@@ -6,6 +6,7 @@ import glob
 import shutil
 import time
 import hashlib
+import contextlib
 import subprocess
 import multiprocessing
 import tempfile
@@ -44,7 +45,7 @@ def raise_fd_limit(logger):
             logger.log(f"Raised open-file limit: {soft} -> {hard}")
         else:
             logger.log(f"Open-file limit: {soft} (already at hard limit)")
-    except Exception as e:
+    except (ImportError, ValueError, OSError) as e:  # no 'resource' module / limit refused
         logger.log(f"Could not raise open-file limit: {e}")
 
 
@@ -198,9 +199,7 @@ def same_size_and_mtime(source, copy):
     copy_stat = os.stat(copy)
     if source_stat.st_size != copy_stat.st_size:
         return False
-    if int(source_stat.st_mtime) != int(copy_stat.st_mtime):
-        return False
-    return True
+    return int(source_stat.st_mtime) == int(copy_stat.st_mtime)
 
 
 def energy_label(mev):
@@ -303,11 +302,8 @@ class RAMDiskManager:
         The configs call the key 'keep'; older code read 'keep_intermediate'.
         Both are honoured.
         """
-        if self.config.get('keep', False):
-            return True
-        if self.config.get('keep_intermediate', False):
-            return True
-        return False
+        return bool(self.config.get('keep', False)
+                    or self.config.get('keep_intermediate', False))
 
     def setup(self):
         if not self.enabled:
@@ -323,7 +319,7 @@ class RAMDiskManager:
                 self.logger.log(f"RAM Disk disabled: System has {mem_total}GB RAM, required {self.min_ram}GB")
                 self.enabled = False
                 return False
-        except Exception as e:
+        except (OSError, ValueError, IndexError) as e:  # unreadable/unexpected /proc/meminfo
             # If we cant determine the RAM, disable RAM disk, then we will just run without RAM disk
             self.logger.log(f"Could not determine system RAM: {e}")
             return False
@@ -609,7 +605,7 @@ class JobScheduler:
                     overrides[idx] = out_path
             self.logger.log(f"Spacecraft slicing: {len(overrides)}/{len(files)} weekly slices in {time.time()-t0:.1f}s")
             return overrides
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - optimization only; pool.map re-raises any worker error
             self.logger.log(f"Spacecraft slicing failed ({e}) - all weeks use the merged file")
             return {}
 
@@ -1064,10 +1060,8 @@ class JobScheduler:
         # next to the output, e.g. into ./data, and could leave them behind).
         for d in {temp_dir, os.path.dirname(output_file)}:
             for stale in glob.glob(os.path.join(d, "temp_merge_stage*")):
-                try:
+                with contextlib.suppress(OSError):
                     os.remove(stale)
-                except OSError:
-                    pass
 
         while len(current_files) > 1:
             stage += 1
@@ -1104,10 +1098,8 @@ class JobScheduler:
             # Remove the previous stage's temp inputs (not the original chunks at stage 1)
             if stage > 1:
                 for f in current_files:
-                    try:
+                    with contextlib.suppress(OSError):
                         os.remove(f)
-                    except OSError:
-                        pass
             current_files = next_files
 
         if current_files:
@@ -1181,7 +1173,7 @@ def sc_fingerprint(path):
             d = hdul['SC_DATA'].data
             return (f"{len(d)}:{d['START'][0]:.3f}:{d['STOP'][-1]:.3f}:"
                     f"{float(np.sum(d['LIVETIME'])):.6f}")
-    except Exception:
+    except (OSError, KeyError, IndexError, ValueError):  # unreadable / no SC_DATA / empty
         try:
             st = os.stat(path)
             return f"stat:{os.path.basename(path)}:{st.st_size}:{int(st.st_mtime)}"
@@ -1260,10 +1252,7 @@ def execute_worker(task):
                 step_name = step.get('name', '')
                 
                 # Skip steps not in the selected list
-                should_run = True
-                if selected_steps is not None:
-                     if step_name not in selected_steps:
-                         should_run = False
+                should_run = selected_steps is None or step_name in selected_steps
                 
                 # Resolve output paths (even for skipped steps, to populate context)
                 step_paths = []
@@ -1367,15 +1356,13 @@ def execute_worker(task):
                     if (inputs_are_copies and not dry_run
                             and step_idx == last_input_step_idx
                             and os.path.exists(input_file)):
-                        try:
+                        with contextlib.suppress(OSError):
                             os.remove(input_file)
-                        except OSError:
-                            pass
 
         return {'id': chunk_id, 'success': True, 'outputs': chunk_outputs,
                 'timings': timings, 'ltcube_cache': cache_stats, 'skipped': skipped}
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - worker boundary: report the chunk as failed, don't kill the pool
         return {'id': chunk_id, 'success': False, 'error': str(e)}
 
 
@@ -1412,7 +1399,7 @@ def accumulate_image_sum_worker(queue, out_dir, worker_id):
                     a['count'] += 1
                     a['gti'] = merge_gti_rows(a.get('gti', []), gti)
             os.remove(fp)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - keep draining; the parent catches the missing chunk by count
             print(f"Accumulator {worker_id}: image_sum failed for {fp}: {e}")
 
     for key, a in accum.items():
@@ -1446,7 +1433,7 @@ def read_sc_hash(path):
     try:
         with fits.open(path) as hdul:
             return hdul[0].header.get(SC_HASH_KEY)
-    except Exception:
+    except OSError:  # missing or unreadable file
         return None
 
 
@@ -1552,7 +1539,7 @@ def slice_sc_worker(args):
                     h['TSTOP'] = tstop
             fits.HDUList([primary, new_sc]).writeto(out_path, overwrite=True)
         return (idx, out_path, None)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - worker boundary: that week falls back to the merged file
         return (idx, None, f"{out_path}: {e}")
 
 
@@ -1745,7 +1732,7 @@ def seed_system_pfiles(logger):
             return
         os.environ["PFILES"] = f"{local_part};{seed_dir}"
         logger.log(f"System pfiles mirrored locally ({len(seen)} pars, {n_copied} updated) -> {seed_dir}")
-    except Exception as e:
+    except OSError as e:  # includes shutil.Error
         logger.log(f"Could not mirror system pfiles locally ({e}) - keeping {sys_part}")
 
 
@@ -1826,7 +1813,7 @@ def stage_tools_locally(config, logger):
             os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
             logger.log(f"Staged {len(staged)} tools on local disk in {time.time()-t0:.1f}s "
                        f"({', '.join(staged)}) -> {bin_dir}")
-    except Exception as e:
+    except (OSError, ValueError) as e:  # file copy / ldd missing / undecodable ldd output
         logger.log(f"Could not stage tools locally ({e}) - running them from the env")
 
 
@@ -1881,7 +1868,7 @@ def merge_batch_worker(args):
                 return (None, f"{cmd}\nSTDERR: {(e.stderr or '').strip()}")
             os.replace(temp_sum, batch_out)
         return (batch_out, None)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - worker boundary: the parent logs it and fails the merge
         return (None, f"{tool} batch merge exception: {e}")
 
 
@@ -1938,7 +1925,7 @@ def main():
         scheduler = JobScheduler(config, logger)
         result = scheduler.run()
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - top level: log, traceback, clean up the RAM disk, exit 1
         logger.error(f"Fatal error: {e}")
         import traceback
         traceback.print_exc()
@@ -1947,7 +1934,7 @@ def main():
         if scheduler is not None:
             try:
                 scheduler.cleanup()
-            except Exception as cleanup_error:
+            except Exception as cleanup_error:  # noqa: BLE001 - must not mask the original error
                 logger.log(f"Cleanup after the failure also failed: {cleanup_error}")
         # Exit non-zero so run_background.sh / CI can tell a crash from a
         # clean finish (single_run.py already did this; this did not).

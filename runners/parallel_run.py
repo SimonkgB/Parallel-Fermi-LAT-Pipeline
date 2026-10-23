@@ -1830,8 +1830,8 @@ def run_gtool_with_retry(cmd, env, max_tries=3):
     """
     for attempt in range(1, max_tries + 1):
         try:
-            return subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE, text=True, env=env)
+            return subprocess.run(cmd, shell=True, check=True, capture_output=True,
+                                  text=True, env=env)
         except subprocess.CalledProcessError as e:
             if APE_TRANSIENT_MARKER not in (e.stderr or "") or attempt == max_tries:
                 raise

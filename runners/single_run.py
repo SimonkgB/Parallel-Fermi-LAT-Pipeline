@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
-import sys
-import os
 import argparse
+import os
+import sys
 import time
 
 # parallel_run.py lives in the same directory, so import it directly
-from parallel_run import (JobScheduler, ConfigLoader, Logger, check_fermi_environment,
-                          seed_system_pfiles, raise_fd_limit, REPO_ROOT)
+from parallel_run import (
+    REPO_ROOT,
+    ConfigLoader,
+    JobScheduler,
+    Logger,
+    check_fermi_environment,
+    raise_fd_limit,
+    seed_system_pfiles,
+)
+
 
 def main():
     # See parallel_run.main(): config paths and logs are repo-root relative.
@@ -14,7 +22,9 @@ def main():
 
     parser = argparse.ArgumentParser(description="Single-Core Fermi Runner (Baseline)")
     parser.add_argument("config", help="Path to YAML configuration file")
-    parser.add_argument("--dry-run", action="store_true", help="Print commands without executing")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Print commands without executing"
+    )
 
     args = parser.parse_args()
 
@@ -30,34 +40,36 @@ def main():
         seed_system_pfiles(logger)
 
         # Force single-core baseline: 1 core, no RAM disk (standard disk I/O)
-        if 'resources' not in config:
-            config['resources'] = {}
-        config['resources']['cores'] = 1
-        if 'ram_disk' not in config['resources']:
-            config['resources']['ram_disk'] = {}
-        config['resources']['ram_disk']['enabled'] = False
+        if "resources" not in config:
+            config["resources"] = {}
+        config["resources"]["cores"] = 1
+        if "ram_disk" not in config["resources"]:
+            config["resources"]["ram_disk"] = {}
+        config["resources"]["ram_disk"]["enabled"] = False
 
         # Run options come from the optional 'run:' section of the YAML config
-        run_opts = config.get('run', {}) or {}
-        config['dry_run'] = args.dry_run
-        config['skip_merge'] = run_opts.get('skip_merge', False)
-        config['skip_post'] = run_opts.get('skip_post', False)
-        config['selected_steps'] = run_opts.get('steps', None)  # None implies all steps
+        run_opts = config.get("run", {}) or {}
+        config["dry_run"] = args.dry_run
+        config["skip_merge"] = run_opts.get("skip_merge", False)
+        config["skip_post"] = run_opts.get("skip_post", False)
+        config["selected_steps"] = run_opts.get("steps", None)  # None implies all steps
 
         # Execute
         scheduler = JobScheduler(config, logger)
-        
+
         start_time = time.time()
         scheduler.run()
         end_time = time.time()
-        
+
         logger.log(f"Single core run complete in {end_time - start_time:.2f} seconds.")
-        
+
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

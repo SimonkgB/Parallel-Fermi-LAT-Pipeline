@@ -6,7 +6,7 @@ eval "$(micromamba shell hook --shell bash)"
 micromamba activate fermi
 
 echo "========================================"
-echo "Event counts in data/ files"
+echo "Event counts in data/output/ files"
 echo "========================================"
 
 python3 <<'EOF'
@@ -25,7 +25,7 @@ def total_counts(hdul):
             return int(sum(np.sum(hdu.data[c]) for c in hdu.data.names))
     return 0
 
-files = sorted(glob.glob("./data/*.fits"))
+files = sorted(glob.glob("./data/output/*.fits"))
 
 for filepath in files:
     filename = os.path.basename(filepath)

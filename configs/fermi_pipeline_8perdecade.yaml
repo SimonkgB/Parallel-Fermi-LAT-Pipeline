@@ -25,7 +25,8 @@ vars:
   irfs: "P8R3_ULTRACLEANVETO_V3" # opt: P8R3_SOURCEVETO_V3, P8R3_CLEAN_V3, P8R3_ULTRACLEANVETO_V3
 
   # Directories
-  data_dir: ${root:data}
+  input_dir: ${root:data/input}     # auxiliary inputs (time-exclusion CSVs, ...)
+  data_dir: ${root:data/output}     # pipeline products
   scripts_dir: ${root:scripts}
 
   # Pipeline products. energy_tag/selection_tag/grid_tag/week_tag are resolvers
@@ -34,7 +35,7 @@ vars:
   # selection carries the time-exclusion tag ('' without exclusions, e.g.
   # '-xflsf1h' with the FLSF flares cut), so cut and uncut products never
   # share a file name.
-  selection: ${selection_tag:${vars.zmax}}${exclusion_tag:${time_exclusions.flsf_dir},${time_exclusions.pad_hours},${time_exclusions.windows}}
+  selection: ${selection_tag:${vars.zmax}}${exclusion_tag:${time_exclusions.flsf_dir},${time_exclusions.pad_hours},${time_exclusions.windows},${time_exclusions.windows_csv}}
   grid: ${grid_tag:${vars.hpx_order},${vars.coordsys}}
   weeks: ${week_tag:${input.directory},${input.pattern},${input.weeks}}
 
@@ -106,6 +107,10 @@ time_exclusions:
   flsf_dir: "/mn/stornext/d23/cmbco/globe/fermi/solar_flares_FLSF"
   # Added before and after every window (hours)
   pad_hours: 1.0
+  # CSV of UTC windows, one per row ('start_utc', 'stop_utc' columns), e.g.
+  #   windows_csv: ${vars.input_dir}/sun_transients.csv
+  # "" = none.
+  windows_csv: ""
   # Extra UTC windows [start, stop], e.g. cycle-25 flares the catalogue lacks:
   #   - ["2024-05-14T16:00", "2024-05-15T06:00"]
   windows: []

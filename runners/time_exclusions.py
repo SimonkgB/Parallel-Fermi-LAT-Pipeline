@@ -10,8 +10,12 @@ Windows come from the 'time_exclusions' config section:
     time_exclusions:
       flsf_dir: /path/to/solar_flares_FLSF   # First Fermi-LAT Solar Flare catalog CSVs
       pad_hours: 1.0                          # added on both sides of every window
+      windows_csv: data/input/sun_transients.csv   # UTC windows, one per row
       windows:                                # extra UTC windows, e.g. flares after 2018
         - ["2024-05-14T16:00", "2024-05-15T06:00"]
+
+windows_csv needs 'start_utc' and 'stop_utc' columns (ISO UTC); any other
+column is ignored.
 
 FLSF (Ajello et al. 2021, ApJS 252, 13): 45 flares of 2010-2018, solar cycle
 24 only. A flare's window runs from its GOES start to the end of its last
@@ -96,6 +100,16 @@ def flsf_windows(flsf_dir):
     return [tuple(f) for f in flares] + loose + lle
 
 
+def csv_windows(path):
+    """UTC (start, stop) per row of a CSV with 'start_utc'/'stop_utc' columns."""
+    rows = _read_csv(path)
+    if rows and not {'start_utc', 'stop_utc'} <= set(rows[0]):
+        raise ValueError(f"time_exclusions.windows_csv {path}: needs 'start_utc' and "
+                         f"'stop_utc' columns, has {sorted(rows[0])}")
+    return [(datetime.fromisoformat(r['start_utc'].strip()),
+             datetime.fromisoformat(r['stop_utc'].strip())) for r in rows]
+
+
 def merge_windows(windows):
     """Sort and merge overlapping (start, stop) windows."""
     out = []
@@ -114,6 +128,8 @@ def exclusion_windows(cfg):
     utc = []
     if cfg.get('flsf_dir'):
         utc += flsf_windows(cfg['flsf_dir'])
+    if cfg.get('windows_csv'):
+        utc += csv_windows(cfg['windows_csv'])
     for w in cfg.get('windows') or []:
         if len(w) != 2:
             raise ValueError(f"time_exclusions.windows entry {w!r}: need [start, stop]")
@@ -136,15 +152,22 @@ def gtmktime_exclusion(windows, tmin, tmax):
                    for t0, t1 in windows if t0 < tmax and t1 > tmin)
 
 
-def resolve_exclusion_tag(flsf_dir="", pad_hours=0, windows=None):
-    """Product-name suffix: '' without exclusions, else e.g. '-xflsf1h' or
-    '-xflsf1h+2w3f9a1c' (2 extra windows, hash of their bounds), so cut and
-    uncut products never share a file name."""
+def resolve_exclusion_tag(flsf_dir="", pad_hours=0, windows=None, windows_csv=""):
+    """Product-name suffix: '' without exclusions, else e.g. '-xflsf1h',
+    '-xflsf1h+2w3f9a1c' (2 extra windows, hash of their bounds) or
+    '-xflsf1h+sun_transients64w5d0e2b' (64 windows from sun_transients.csv),
+    so cut and uncut products never share a file name."""
     windows = list(windows or [])
-    if not flsf_dir and not windows:
+    if not flsf_dir and not windows and not windows_csv:
         return ""
     tag = "-x" + ("flsf" if flsf_dir else "") + f"{float(pad_hours or 0):g}h"
     if windows:
         digest = hashlib.sha256(repr([[str(s) for s in w] for w in windows]).encode())
         tag += f"+{len(windows)}w{digest.hexdigest()[:6]}"
+    if windows_csv:
+        # Hash of the windows, not the file: editing other columns keeps the tag
+        rows = csv_windows(windows_csv)
+        digest = hashlib.sha256(repr([[str(s) for s in w] for w in rows]).encode())
+        stem = os.path.splitext(os.path.basename(windows_csv))[0]
+        tag += f"+{stem}{len(rows)}w{digest.hexdigest()[:6]}"
     return tag

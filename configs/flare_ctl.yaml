@@ -1,0 +1,200 @@
+# fermi_pipeline_8perdecade.yaml
+# Configuration for the Fermi LAT Parallel Runner
+
+##########
+# Notes: #
+##########
+# Variant of fermi_pipeline.yaml with 8 energy bins per decade.
+# Range 100 MeV -> 316.228 GeV = 3.5 decades, so enumbins = 8 * 3.5 = 28.
+# emax=316228 MeV places the bin edges exactly on the 8/decade grid anchored
+# at 100 MeV (100 * 10^(28/8) = 316227.77). The bins-per-decade relationship is:
+#     bins_per_decade = enumbins / log10(emax/emin)
+# The energy range + enumbins are declared once under 'vars' below, so
+# gtbin_healpix and gtexpcube2 cannot drift apart.
+
+
+vars:
+  # Analysis parameters (emin/emax in MeV, per Ftools convention)
+  emin: 100              # lowest bin edge
+  emax: 316228           # highest bin edge
+  enumbins: 28           # number of energy bins (logarithmic) over emin->emax      (ie: 100 * 10^(28/8) stuff)
+  evtype: 3              # event type: 3 = FRONT+BACK, 4/8/16/32 = PSF types
+  zmax: 90               # zenith angle cut (degrees)
+  hpx_order: 7           # nside = 2^7 = 128
+  coordsys: "GAL"        # hpx binning coordinate system: GALactic, EQuatorial, or CELestial
+  irfs: "P8R3_ULTRACLEANVETO_V3" # opt: P8R3_SOURCEVETO_V3, P8R3_CLEAN_V3, P8R3_ULTRACLEANVETO_V3
+
+  # Directories
+  input_dir: ${root:data/input}     # auxiliary inputs (time-exclusion CSVs, ...)
+  data_dir: ${root:data/output}     # pipeline products
+  scripts_dir: ${root:scripts}
+
+  # Pipeline products. energy_tag/selection_tag/grid_tag/week_tag are resolvers
+  # registered by runners/parallel_run.py, not entries in this file.
+  energy_tag: ${energy_tag:${vars.emin},${vars.emax},${vars.enumbins}}
+  # CONTROL for flare.yaml: only the CAP window (same pipeline, no flare cut). Was: '-xflsf1h+sun64': FLSF flares + the 64 Sun-centred transient windows of
+  # bcofgammasky scripts/analysis/sun_transients.py (2026-10-30), 1 h padding
+  selection: ${selection_tag:${vars.zmax}}-cap
+  grid: ${grid_tag:${vars.hpx_order},${vars.coordsys}}
+  weeks: ${week_tag:${input.directory},${input.pattern}}
+
+  counts:    ${vars.data_dir}/counts_${vars.energy_tag}_${vars.selection}_${vars.grid}_${vars.weeks}.fits
+  exposure:  ${vars.data_dir}/exposure_${vars.energy_tag}_${vars.selection}_${vars.grid}_${vars.weeks}.fits
+  livetime:  ${vars.data_dir}/livetime_${vars.selection}_${vars.weeks}.fits
+  flux:      ${vars.data_dir}/flux_${vars.energy_tag}_${vars.selection}_${vars.grid}_${vars.weeks}.fits
+
+
+# Solar flares cut in gtmktime (photons and livetime together), see runners/time_exclusions.py
+time_exclusions:
+  flsf_dir: ""
+  pad_hours: 1.0
+  windows_csv: ""   # no flare cut (flare.yaml: ${vars.input_dir}/sun_transients.csv)
+  windows:   # UTC
+    - ["2026-07-09T18:48:39", "2027-01-01T00:00:00"]   # CAP: production stops at MET 805315724
+
+fermi_base: "/mn/stornext/d5/data/skgberg/software/micromamba/envs/fermi"
+
+##########################
+# Resource Configuration #
+##########################
+resources:
+  # livetime cube caching: if enabled, the runner will reuse livetime cubes across runs with the same GTIs.
+  # This works because the livetime cube depends only on the GTIs, not on the energy binning or map geometry.
+  # The cache is stored in a directory specified by 'path' and can be deleted at any time without affecting the correctness of the pipeline.
+  ltcube_cache:
+    enabled: true
+    path: "./ltcube_cache"
+  # Merge finished livetime cubes in the background during processing
+  stream_merge: true
+  # Number of cores to use (defaults to CPU count if not specified or "auto")
+  cores: 224
+  # RAM disk settings
+  ram_disk:
+    enabled: true
+    path: "/dev/shm/fermi_processing"
+    keep: false
+    # Minimum RAM required (GB) to enable RAM disk
+    min_ram_gb: 500
+
+############################
+# Input Data Configuration #
+############################
+input:
+  # Directory containing source files
+  directory: ${root:input}
+  # Glob pattern to match files
+  pattern: "lat_photon_weekly_w*.fits"
+
+# Common Files (Cached to RAM in parallel mode for speed)
+common_files:
+  scfile: /uio/hume/student-u42/skgberg/data/linwork/data/raw/ft2/lat_spacecraft_merged.fits
+
+
+####################
+# Processing Steps #
+####################
+# The following commands are ran in parallel for each chunk, producing a HEALPix counts map for any given chunk
+steps:
+  - name: "gtselect"
+    command: >
+      gtselect evclass=1024 evtype=${vars.evtype}
+      infile={input}
+      outfile={temp_select}
+      ra=0 dec=0 rad=180
+      tmin=INDEF tmax=INDEF
+      emin=${vars.emin} emax=${vars.emax}
+      zmax=${vars.zmax}
+    outputs:
+      - "{temp_select}" # Intermediate file
+
+  - name: "gtmktime"
+    # Create Good Time Intervals (GTIs) from the selected events
+    command: >
+      gtmktime
+      scfile={scfile}
+      filter="(DATA_QUAL>0)&&(LAT_CONFIG==1){time_exclusion}"
+      roicut=no
+      evfile={temp_select}
+      outfile={temp_gti}
+    outputs:
+      - "{temp_gti}" # Intermediate file
+    cleanup:
+      - "{temp_select}" # Delete the previous step's output to save space
+
+  - name: "gtbin_healpix"
+  # Branch 1: Create HEALPix counts map from GTI
+    command: >
+      gtbin
+      algorithm=HEALPIX
+      evfile={temp_gti}
+      outfile={chunk_hpxcube}
+      scfile={scfile}
+      hpx_ordering_scheme=RING hpx_order=${vars.hpx_order} coordsys=${vars.coordsys}
+      hpx_ebin=yes hpx_region=""
+      ebinalg=LOG emin=${vars.emin} emax=${vars.emax} enumbins=${vars.enumbins}
+    outputs:
+      - "{chunk_hpxcube}" # Final chunk output 1
+
+  - name: "gtltcube"
+    # Branch 2: Create Livetime Cube from GTI
+    command: >
+      gtltcube
+      evfile={temp_gti}
+      scfile={scfile}
+      outfile={chunk_ltcube}
+      dcostheta=0.025 binsz=1 phibins=1 zmax=${vars.zmax}
+    outputs:
+      - "{chunk_ltcube}" # Final chunk output 2
+    cleanup:
+      - "{temp_gti}" # Cleanup GTI after both branches are done using it
+
+
+#########################
+# Merging Configuration #
+#########################
+# Define how to merge the results from all parallel chunks.
+# Output names come from 'vars' above, so they always describe the parameters
+# the steps actually ran with.
+merging:
+  # Merge HEALPix counts maps and livetime cubes from all chunks into single files
+  - name: "merge_hpxcubes"
+    input_pattern: "{chunk_hpxcube}"
+    output_file: ${vars.counts}
+    strategy: "image_sum"
+
+  - name: "merge_ltcubes"
+    input_pattern: "{chunk_ltcube}"
+    # Livetime does not depend on energy, so no energy range in the name
+    output_file: ${vars.livetime}
+    # 'hierarchical': Uses gtltsum in a binary tree fashion
+    # other options: 'image_sum' (numpy sum), 'fits_sum' (FITS sum), 'gtltsum' (gtltsum tool)
+    strategy: "hierarchical"
+    tool: "gtltsum" # Tool to use for the binary merge
+
+
+###################
+# Post-Processing #
+###################
+# Steps to run ONCE after everything is merged
+post_processing:
+  - name: "gtexpcube2"
+    # Create exposure map from merged livetime cube and counts map
+    command: >
+      gtexpcube2
+      infile=${vars.livetime}
+      cmap=${vars.counts}
+      outfile=${vars.exposure}
+      irfs=${vars.irfs}
+      evtype=${vars.evtype}
+      bincalc=CENTER
+      hpx_ordering_scheme=RING hpx_order=${vars.hpx_order}
+      nxpix=1 nypix=1 binsz=1 coordsys=${vars.coordsys} xref=0 yref=0 axisrot=0 proj=AIT
+      emin=${vars.emin} emax=${vars.emax} enumbins=${vars.enumbins} ebinfile=NONE
+
+###########
+# Future? #
+###########
+science_models:
+  galactic_diffuse: "gll_iem_v07.fits"
+  isotropic: iso_${vars.irfs}_v1.txt  # matched to evclass/evtype via vars.irfs; use per-PSF-type files if splitting by PSF later
+  point_source_catalog: "4FGL-DR4"

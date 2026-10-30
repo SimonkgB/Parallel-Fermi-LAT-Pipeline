@@ -25,7 +25,9 @@ A parallel processing pipeline for Fermi LAT data analysis using Ftools. Massive
 │   └── parallel_expcube.py    # Energy-parallel gtexpcube2 (one process per bin)
 ├── ltcache/                   # Cache to store the LTCube 
 ├── logs/                      # All runtime logs end up here
-├── data/                      # Merged output FITS files
+├── data/
+│   ├── input/                 # Auxiliary inputs (time-exclusion CSVs, ...)
+│   └── output/                # Merged output FITS files
 └── README.md
 ```
 
@@ -103,6 +105,7 @@ map, livetime cube and exposure stay consistent).
 time_exclusions:
   flsf_dir: "/path/to/solar_flares_FLSF"   # First Fermi-LAT Solar Flare catalog CSVs
   pad_hours: 1.0                            # added on both sides of every window
+  windows_csv: ${vars.input_dir}/sun_transients.csv  # one window per row
   windows:                                  # extra UTC windows, e.g. flares after 2018
     - ["2024-05-14T16:00", "2024-05-15T06:00"]
 ```
@@ -110,6 +113,8 @@ time_exclusions:
 - The FLSF catalogue (Ajello et al. 2021, ApJS 252, 13) holds 45 flares of
   2010-2018. A flare's window runs from its GOES start to the end of its last
   LAT detection window; with 1 h padding the 45 windows total ~251 h.
+- `windows_csv` reads the `start_utc`/`stop_utc` columns (ISO UTC) of every
+  row; other columns are ignored. Put such CSVs in `data/input/`.
 - Product names carry a tag (`zmax90-xflsf1h`), so cut and uncut products
   never overwrite each other.
 - Configuring windows without `{time_exclusion}` in the gtmktime filter is an

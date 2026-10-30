@@ -137,7 +137,7 @@ def validate_config(config, logger=None):
     # no-op producing uncut data under a cut product name, so this one is an
     # error, not a warning.
     tx = config.get('time_exclusions') or {}
-    if tx.get('flsf_dir') or tx.get('windows'):
+    if tx.get('flsf_dir') or tx.get('windows') or tx.get('windows_csv'):
         if not any('{time_exclusion}' in (st.get('command') or '')
                    and (st.get('command') or '').split()[0] == 'gtmktime'
                    for st in config.get('steps', []) or []):
@@ -145,6 +145,8 @@ def validate_config(config, logger=None):
                              "'{time_exclusion}' in its filter: nothing would be cut")
         if tx.get('flsf_dir') and not os.path.isdir(tx['flsf_dir']):
             raise ValueError(f"time_exclusions.flsf_dir does not exist: {tx['flsf_dir']}")
+        if tx.get('windows_csv') and not os.path.isfile(tx['windows_csv']):
+            raise ValueError(f"time_exclusions.windows_csv does not exist: {tx['windows_csv']}")
 
     # A post_processing step that shells out to a missing script fails only
     # after everything else has run; catch it at startup instead.

@@ -13,6 +13,7 @@ A parallel processing pipeline for Fermi LAT data analysis using Ftools. Massive
 ```
 ├── runners/
 │   ├── parallel_run.py        # Main parallel pipeline runner
+│   ├── time_exclusions.py     # Time windows cut from the data (solar flares, ...)
 │   └── single_run.py          # Single-core baseline runner (for benchmarking)
 ├── configs/
 │   └── fermi_pipeline_8perdecade.yaml  # Pipeline configuration
@@ -89,6 +90,31 @@ run:
 `scripts/run_background.sh` starts the same command detached (`nohup`), from the
 activated env.
 
+
+## Time exclusions (solar flares)
+
+Time windows can be cut from the data with the `time_exclusions:` section of
+the config. The cut acts in `gtmktime`: the `{time_exclusion}` placeholder in
+its filter is replaced, per week, by the windows that overlap that week, so
+the photons and the livetime of those intervals are removed together (counts
+map, livetime cube and exposure stay consistent).
+
+```yaml
+time_exclusions:
+  flsf_dir: "/path/to/solar_flares_FLSF"   # First Fermi-LAT Solar Flare catalog CSVs
+  pad_hours: 1.0                            # added on both sides of every window
+  windows:                                  # extra UTC windows, e.g. flares after 2018
+    - ["2024-05-14T16:00", "2024-05-15T06:00"]
+```
+
+- The FLSF catalogue (Ajello et al. 2021, ApJS 252, 13) holds 45 flares of
+  2010-2018. A flare's window runs from its GOES start to the end of its last
+  LAT detection window; with 1 h padding the 45 windows total ~251 h.
+- Product names carry a tag (`zmax90-xflsf1h`), so cut and uncut products
+  never overwrite each other.
+- Configuring windows without `{time_exclusion}` in the gtmktime filter is an
+  error, not a silent no-op.
+- Weeks without a window keep hitting livetime cubes cached before the cut.
 
 ## Inspiration/credits
 The example yaml and currently working pipeline take complete inspiration of the great work of the Fermi ScienceTools team: https://github.com/fermi-lat/ScienceTools

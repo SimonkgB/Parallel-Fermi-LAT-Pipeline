@@ -31,7 +31,10 @@ vars:
   # Pipeline products. energy_tag/selection_tag/grid_tag/week_tag are resolvers
   # registered by runners/parallel_run.py, not entries in this file.
   energy_tag: ${energy_tag:${vars.emin},${vars.emax},${vars.enumbins}}
-  selection: ${selection_tag:${vars.zmax}}
+  # selection carries the time-exclusion tag ('' without exclusions, e.g.
+  # '-xflsf1h' with the FLSF flares cut), so cut and uncut products never
+  # share a file name.
+  selection: ${selection_tag:${vars.zmax}}${exclusion_tag:${time_exclusions.flsf_dir},${time_exclusions.pad_hours},${time_exclusions.windows}}
   grid: ${grid_tag:${vars.hpx_order},${vars.coordsys}}
   weeks: ${week_tag:${input.directory},${input.pattern},${input.weeks}}
 
@@ -90,6 +93,24 @@ spacecraft:
 #   scfile: "/path/to/lat_spacecraft_merged.fits"
 
 
+###################
+# Time Exclusions #
+###################
+# Time windows cut from the data. They act in gtmktime (through the
+# '{time_exclusion}' placeholder in its filter below): every spacecraft row
+# overlapping a window leaves the GTIs, so photons and livetime of that
+# interval are removed together. See runners/time_exclusions.py.
+time_exclusions:
+  # First Fermi-LAT Solar Flare catalog (Ajello+2021, ApJS 252, 13): 45 flares,
+  # 2010-2018 (solar cycle 24 only). "" = no catalogue flares.
+  flsf_dir: "/mn/stornext/d23/cmbco/globe/fermi/solar_flares_FLSF"
+  # Added before and after every window (hours)
+  pad_hours: 1.0
+  # Extra UTC windows [start, stop], e.g. cycle-25 flares the catalogue lacks:
+  #   - ["2024-05-14T16:00", "2024-05-15T06:00"]
+  windows: []
+
+
 ####################
 # Processing Steps #
 ####################
@@ -112,7 +133,7 @@ steps:
     command: >
       gtmktime
       scfile={scfile}
-      filter="(DATA_QUAL>0)&&(LAT_CONFIG==1)"
+      filter="(DATA_QUAL>0)&&(LAT_CONFIG==1){time_exclusion}"
       roicut=no
       evfile={temp_select}
       outfile={temp_gti}

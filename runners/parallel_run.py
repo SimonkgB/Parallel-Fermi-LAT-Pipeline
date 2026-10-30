@@ -20,6 +20,12 @@ import numpy as np
 from astropy.io import fits
 from omegaconf import OmegaConf
 
+try:  # run as a script (runners/ on sys.path) or imported as runners.parallel_run
+    from time_exclusions import exclusion_windows, gtmktime_exclusion, resolve_exclusion_tag
+except ImportError:
+    from runners.time_exclusions import (exclusion_windows, gtmktime_exclusion,
+                                         resolve_exclusion_tag)
+
 # Root of the repository (this file lives in <repo>/runners/). Used both by the
 # '${root:...}' config resolver and by the os.chdir() in the entry points, so
 # that nothing depends on the directory the pipeline was launched from.
@@ -96,6 +102,7 @@ class Logger:
 KNOWN_TOP_LEVEL_KEYS = {
     'vars', 'resources', 'input', 'spacecraft', 'common_files',
     'steps', 'merging', 'post_processing', 'science_models', 'run',
+    'time_exclusions',
 }
 
 KNOWN_RESOURCE_KEYS = {
@@ -124,6 +131,20 @@ def validate_config(config, logger=None):
 
     for key in sorted(set(config.get('resources', {}) or {}) - KNOWN_RESOURCE_KEYS):
         warn(f"unknown key 'resources.{key}' (ignored)")
+
+    # Time exclusions only act through the '{time_exclusion}' placeholder in
+    # the gtmktime filter. Configured windows without it would be a silent
+    # no-op producing uncut data under a cut product name, so this one is an
+    # error, not a warning.
+    tx = config.get('time_exclusions') or {}
+    if tx.get('flsf_dir') or tx.get('windows'):
+        if not any('{time_exclusion}' in (st.get('command') or '')
+                   and (st.get('command') or '').split()[0] == 'gtmktime'
+                   for st in config.get('steps', []) or []):
+            raise ValueError("time_exclusions is configured but no gtmktime step has "
+                             "'{time_exclusion}' in its filter: nothing would be cut")
+        if tx.get('flsf_dir') and not os.path.isdir(tx['flsf_dir']):
+            raise ValueError(f"time_exclusions.flsf_dir does not exist: {tx['flsf_dir']}")
 
     # A post_processing step that shells out to a missing script fails only
     # after everything else has run; catch it at startup instead.
@@ -254,6 +275,7 @@ CONFIG_RESOLVERS = {
     "selection_tag": resolve_selection_tag,
     "grid_tag": resolve_grid_tag,
     "week_tag": resolve_week_tag,
+    "exclusion_tag": resolve_exclusion_tag,
 }
 
 
@@ -642,11 +664,27 @@ class JobScheduler:
             cache_task_info = {'dir': cache_dir, 'sig': ltcube_signature(self.config['steps'])}
             self.logger.log(f"Ltcube cache enabled: {cache_dir}")
 
+        # Time exclusions (solar flares, ...): each week's gtmktime filter gets
+        # the windows overlapping that week, via the '{time_exclusion}'
+        # placeholder ('' for weeks with none, or without the section).
+        windows = exclusion_windows(self.config.get('time_exclusions'))
+        week_exclusion = [""] * len(files)
+        if windows:
+            n_workers = max(1, min(self.cores, len(files)))
+            with multiprocessing.Pool(n_workers) as pool:
+                ranges = pool.map(read_time_range, [str(f) for f in files])
+            week_exclusion = [gtmktime_exclusion(windows, t0, t1) for t0, t1 in ranges]
+            hours = sum(t1 - t0 for t0, t1 in windows) / 3600.0
+            n_weeks = sum(bool(x) for x in week_exclusion)
+            self.logger.log(f"Time exclusions: {len(windows)} windows, {hours:.1f} h in total, "
+                            f"cut from {n_weeks} of {len(files)} weeks")
+
         copy_sources = getattr(self, 'copy_sources', {})
         for i, f in enumerate(working_files):
             task_context = dict(common_context)
             if i in sc_overrides:
                 task_context['scfile'] = sc_overrides[i]
+            task_context['time_exclusion'] = week_exclusion[i]
             task = {
                 'id': i,
                 'files': [f],
@@ -664,7 +702,8 @@ class JobScheduler:
                 st = files[i].stat()
                 task['ltcube_cache'] = dict(
                     cache_task_info,
-                    input_identity=f"{files[i].name}:{st.st_size}:{int(st.st_mtime)}")
+                    input_identity=f"{files[i].name}:{st.st_size}:{int(st.st_mtime)}",
+                    exclusion=week_exclusion[i])
             tasks.append(task)
 
         # LPT (largest-first) submission order: per-week processing time grows
@@ -1149,7 +1188,11 @@ def ltcube_signature(steps):
         elif tool == 'gtselect':
             parts.extend(t for t in cmd.split() if t.startswith(('tmin=', 'tmax=')))
         elif tool == 'gtmktime':
-            m = re.search(r'filter="[^"]*"|filter=\S+', cmd)
+            # Without the '{time_exclusion}' placeholder: weeks with no excluded
+            # window get exactly the old GTIs, so they keep hitting cubes cached
+            # before time exclusions existed. Weeks with windows carry them in
+            # their own cache key (ltcube_cache_file).
+            m = re.search(r'filter="[^"]*"|filter=\S+', cmd.replace('{time_exclusion}', ''))
             parts.append(m.group(0) if m else "")
             m = re.search(r'roicut=\S+', cmd)
             parts.append(m.group(0) if m else "")
@@ -1183,8 +1226,11 @@ def sc_fingerprint(path):
 
 def ltcube_cache_file(cache_info, scfile):
     """Cache path for one week's ltcube: params + input week + SC data."""
+    # The step templates (in 'sig') only hold the '{time_exclusion}'
+    # placeholder; the week's actual windows must be in the key too.
     key = "|".join([cache_info['sig'], cache_info['input_identity'],
-                    sc_fingerprint(scfile or "")])
+                    sc_fingerprint(scfile or "")]
+                   + ([cache_info['exclusion']] if cache_info.get('exclusion') else []))
     digest = hashlib.sha256(key.encode()).hexdigest()[:32]
     return os.path.join(cache_info['dir'], f"ltcube_{digest}.fits")
 
